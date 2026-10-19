@@ -1,0 +1,4 @@
+#!/bin/bash
+# Quit the running app so it can be replaced
+pkill -x VoiceApp 2>/dev/null || true
+exit 0

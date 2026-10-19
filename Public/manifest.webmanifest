@@ -1,0 +1,16 @@
+{
+  "name": "TV Launcher",
+  "short_name": "TV Launcher",
+  "description": "Serien, Filme und YouTube-Videos auf dem Mac mini am Fernseher starten und steuern",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#000000",
+  "theme_color": "#e5194f",
+  "lang": "de",
+  "icons": [
+    { "src": "icon-180.png", "sizes": "180x180", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

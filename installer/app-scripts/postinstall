@@ -1,0 +1,4 @@
+#!/bin/bash
+# Remove the old version that used the previous name
+rm -rf "/Applications/The Voice.app"
+exit 0

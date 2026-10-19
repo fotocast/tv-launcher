@@ -1,0 +1,4 @@
+#!/bin/bash
+# Runs as root after the server component is installed
+bash "/Library/Application Support/TV Launcher/Server/setup-server.sh"
+exit 0

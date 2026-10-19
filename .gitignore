@@ -1,0 +1,8 @@
+.build/
+dist/
+.swiftpm/
+.DS_Store
+.claude/
+# Local, personal settings
+scripts/config.sh
+CLAUDE.md

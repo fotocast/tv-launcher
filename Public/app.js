@@ -104,9 +104,9 @@ async function play(episode) {
   }
 }
 
-async function control(action) {
+async function control(action, button) {
   try {
-    const data = await api("/api/control", { action });
+    const data = await api("/api/control", button ? { action, button } : { action });
     toast(data.message);
   } catch (error) {
     toast(error.message, true);
@@ -124,8 +124,18 @@ const allEpisodes = () => state.shows.flatMap((s) => episodesOf(s.id));
 const seasonsOf = (id) => [...new Set(episodesOf(id).map((e) => e.season))].sort((a, b) => b - a);
 const seasons = () => seasonsOf(state.show);
 
-const KIND_NAMES = { joyn: "Joyn-Serie", youtube: "YouTube-Kanal", movies: "Joyn-Filme", custom: "Eigene Links" };
-const KIND_ICONS = { joyn: "tv", youtube: "youtube", movies: "film", custom: "link" };
+const KIND_NAMES = {
+  joyn: "Joyn-Serie", youtube: "YouTube-Kanal", movies: "Joyn-Filme", custom: "Eigene Links",
+  netflix: "Netflix", prime: "Prime Video", disney: "Disney+",
+};
+const KIND_ICONS = {
+  joyn: "tv", youtube: "youtube", movies: "film", custom: "link", netflix: "netflix", prime: "prime", disney: "disney",
+};
+const STREAMING = ["netflix", "prime", "disney"];
+// Sammlung einzeln gemerkter Links (eigene Shows, Filme, Streaming-Sammlungen)
+const isCollection = (show) => show.kind === "custom" || show.kind === "movies" || (STREAMING.includes(show.kind) && !show.source);
+// Show mit echten Staffeln (Joyn, Netflix-/Prime-Serien)
+const hasSeasons = (show) => !isCollection(show) && show.kind !== "youtube" && seasonsOf(show.id).some((s) => s > 0);
 const kindName = (show) => show.id === YOUTUBE_VIDEOS ? "YouTube-Videos" : KIND_NAMES[show.kind] || "";
 const kindIcon = (show) => show.id === YOUTUBE_VIDEOS ? "youtube" : KIND_ICONS[show.kind] || "link";
 
@@ -155,9 +165,10 @@ function sortedShows() {
 // Kurzinfo unter dem Show-Namen, z. B. "Staffel 16 · 12 Folgen"
 function showInfo(show) {
   const list = episodesOf(show.id);
-  if (show.kind === "joyn") {
+  if (show.kind === "joyn" || (STREAMING.includes(show.kind) && show.source)) {
     const all = seasonsOf(show.id);
     if (!all.length) return state.episodes[show.id] ? "Keine Folgen gefunden" : "Lädt …";
+    if (!hasSeasons(show)) return kindName(show);
     const count = list.filter((e) => e.season === all[0]).length;
     return `Staffel ${all[0]} · ${count} Folgen` + (all.length > 1 ? ` · ${all.length} Staffeln` : "");
   }
@@ -170,6 +181,7 @@ function showInfo(show) {
   const n = list.length;
   if (show.kind === "movies") return n === 1 ? "1 Film" : `${n} Filme`;
   if (show.id === YOUTUBE_VIDEOS) return n === 1 ? "1 Video" : `${n} Videos`;
+  if (STREAMING.includes(show.kind)) return n === 1 ? "1 Titel" : `${n} Titel`;
   return n === 1 ? "1 Link" : `${n} Links`;
 }
 
@@ -344,7 +356,7 @@ function sidebarEntries() {
 
 function sidebarShow(show, inLibrary) {
   {
-    const sub = show.kind === "joyn" ? seasonsOf(show.id).map((s) => ({ label: `Staffel ${s}`, season: s }))
+    const sub = hasSeasons(show) ? seasonsOf(show.id).map((s) => ({ label: `Staffel ${s}`, season: s }))
       : show.kind === "youtube" ? ["Videos", "Shorts"]
         .filter((g) => episodesOf(show.id).some((e) => groupOf(e) === g)).map((g) => ({ label: g, group: g }))
       : [];
@@ -551,9 +563,10 @@ const local = {
 };
 
 async function loadServerInfo() {
-  const [settings, status] = await Promise.allSettled([api("/api/settings"), api("/api/status")]);
+  const [settings, status, browsers] = await Promise.allSettled([api("/api/settings"), api("/api/status"), api("/api/browsers")]);
   if (settings.status === "fulfilled") state.server.settings = settings.value;
   if (status.status === "fulfilled") state.server.status = status.value;
+  if (browsers.status === "fulfilled") state.server.browsers = browsers.value;
   renderSettings();
   renderVolume();
 }
@@ -597,6 +610,15 @@ function renderSettings() {
     $("row-volume").hidden = !$("set-volume-on").checked;
     $("set-volume").value = s.startVolume ?? 50;
     $("set-volume-value").textContent = `${s.startVolume ?? 50} %`;
+    // Browser: installierte, ein eigener Name und „Anderer …“
+    const browserSelect = $("set-browser");
+    browserSelect.replaceChildren(new Option(t("Wie bei der Installation"), ""));
+    for (const name of state.server.browsers?.browsers || []) browserSelect.appendChild(new Option(name, name));
+    if (s.browser && ![...browserSelect.options].some((o) => o.value === s.browser)) {
+      browserSelect.appendChild(new Option(s.browser, s.browser));
+    }
+    browserSelect.appendChild(new Option(t("Anderer Browser …"), "\u0000other"));
+    browserSelect.value = s.browser || "";
     selectValue($("set-seasons"), s.joynSeasons, t("Die neuesten {n}", { n: s.joynSeasons }));
     selectValue($("set-youtube"), s.youtubeRefreshMinutes, t("alle {n} Minuten", { n: s.youtubeRefreshMinutes }));
   }
@@ -615,6 +637,7 @@ function renderSettings() {
   if (st) {
     row(t("Version"), st.version);
     row(t("Rechner"), st.host);
+    if (st.port) row(t("Port"), String(st.port));
     row(t("Browser"), st.browser + (st.closeOldTabs ? ` · ${t("alte Tabs schließen")}` : ""));
     row(t("Bedienungshilfen"), st.accessibility ? `✓ ${t("erlaubt")}` : `✗ ${t("fehlt")}`, st.accessibility);
     row(t("Bildschirmaufnahme"), st.screenRecording ? `✓ ${t("erlaubt")}` : `✗ ${t("fehlt")}`, st.screenRecording);
@@ -683,6 +706,14 @@ function setupSettings() {
   $("set-volume").addEventListener("input", () => { $("set-volume-value").textContent = `${$("set-volume").value} %`; });
   $("set-volume").addEventListener("change", server((s) => { s.startVolume = Number($("set-volume").value); }));
   $("set-seasons").addEventListener("change", server((s) => { s.joynSeasons = Number($("set-seasons").value); }));
+  $("set-browser").addEventListener("change", server((s) => {
+    let value = $("set-browser").value;
+    if (value === "\u0000other") {
+      value = (prompt(t("Name der Browser-App am Mac mini, z. B. Brave Browser:"), s.browser || "") || "").trim();
+      if (!value) return;
+    }
+    s.browser = value || null;
+  }));
   $("set-youtube").addEventListener("change", server((s) => { s.youtubeRefreshMinutes = Number($("set-youtube").value); }));
 
   $("show-log").addEventListener("click", async () => {
@@ -742,6 +773,12 @@ const ADD_KINDS = {
     hint: "Kanal-Link, @Name oder der Link eines Videos aus dem Kanal. Videos und Shorts werden alle 30 Minuten geladen." },
   movie: { label: "Joyn-Film", placeholder: "Link: joyn.de/filme/…",
     hint: "Der Film landet in der Sammlung „Filme“ und startet von dort mit einem Tipp." },
+  netflix: { label: "Netflix", placeholder: "Link: netflix.com/title/…",
+    hint: "Netflix-Titel teilen bzw. Link kopieren (netflix.com/title/…). Alle Staffeln und Folgen werden geladen." },
+  prime: { label: "Prime", placeholder: "Link: primevideo.com/detail/…",
+    hint: "Link einer Staffel von Prime Video. Die Folgen werden geladen; jede Folge startet die Staffel mit Autoplay." },
+  disney: { label: "Disney+", placeholder: "Link aus der Disney+-App",
+    hint: "In der Disney+-App teilen → Link kopieren. Der Titel landet in der Sammlung „Disney+“." },
   custom: { label: "Eigene", placeholder: null,
     hint: "Leere Show anlegen – danach öffnet sie sich und du trägst beliebige Links ein." },
 };
@@ -804,6 +841,84 @@ function renderManage() {
     item.appendChild(row);
     box.appendChild(item);
   });
+}
+
+// Neuer Ordner in einem Schritt: Name eingeben und Shows ankreuzen
+function openFolderCreator(preselected = []) {
+  const selected = new Set(preselected);
+  const body = $("sheet-body");
+  body.replaceChildren();
+  $("sheet-title").textContent = t("Neuer Ordner");
+  $("sheet-save").textContent = t("Anlegen");
+  const group = el("div", "form-group");
+  const name = textInput("", t("Name des Ordners, z. B. Castingshows"), () => {});
+  name.setAttribute("list", "folder-names");
+  name.classList.add("folder-name");
+  group.appendChild(name);
+  const names = el("datalist");
+  names.id = "folder-names";
+  for (const folder of folders()) names.appendChild(new Option(folder, folder));
+  group.appendChild(names);
+  body.appendChild(group);
+  body.appendChild(el("h3", "form-title", "Welche Shows sollen hinein?"));
+  const list = el("div", "form-group");
+  for (const show of state.shows) {
+    const row = el("label", "form-row check-row");
+    const box = el("input", "switch");
+    box.type = "checkbox";
+    box.checked = selected.has(show.id);
+    box.addEventListener("change", () => { box.checked ? selected.add(show.id) : selected.delete(show.id); });
+    row.appendChild(showArtwork(show, "art-small"));
+    const text = el("span", "row-text");
+    text.appendChild(el("span", "manage-name", show.name));
+    if (show.folder) text.appendChild(el("span", "row-subtitle", `📁 ${show.folder}`));
+    row.append(text, box);
+    list.appendChild(row);
+  }
+  body.appendChild(list);
+  body.appendChild(el("p", "hint hint-below", "Gibt es den Ordner schon, kommen die angekreuzten Shows dazu."));
+  state.editing = { folderCreator: true };
+  state.sheetSave = async () => {
+    const folder = name.value.trim();
+    if (!folder) { toast(t("Bitte einen Namen für den Ordner eingeben."), true); return; }
+    if (!selected.size) { toast(t("Bitte mindestens eine Show ankreuzen."), true); return; }
+    $("sheet-save").disabled = true;
+    try {
+      for (const show of state.shows.filter((s) => selected.has(s.id) && s.folder !== folder)) {
+        applyShows(await api("/api/shows", { show: { ...show, folder } }));
+      }
+      closeEditor();
+      toast(t("Ordner „{name}“ angelegt", { name: folder }));
+      render();
+    } catch (error) {
+      toast(error.message, true);
+    } finally {
+      $("sheet-save").disabled = false;
+    }
+  };
+  $("sheet").hidden = false;
+  document.body.classList.add("sheet-open");
+  name.focus();
+}
+
+// Server auf einen anderen Port umziehen – danach lädt die Web-App unter der neuen Adresse
+async function changePort() {
+  const current = state.server.status?.port || Number(location.port) || 8081;
+  const input = (prompt(t("Neuer Port für den Server (1024–65535):"), String(current)) || "").trim();
+  const port = Number(input);
+  if (!input || port === current) return;
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+    toast(t("Bitte einen Port zwischen 1024 und 65535 wählen."), true);
+    return;
+  }
+  try {
+    const data = await api("/api/port", { port });
+    toast(data.message);
+    const url = `${location.protocol}//${location.hostname}:${port}${location.pathname}`;
+    setTimeout(() => { location.href = url; }, 4000);
+  } catch (error) {
+    toast(error.message, true);
+  }
 }
 
 // Überschrift eines Ordners in der Liste „Deine Shows“: umbenennen oder auflösen
@@ -869,6 +984,10 @@ async function addShow(event) {
       const data = await api("/api/movies", { movie: input, play: false });
       toast(data.message);
       await load();
+    } else if (state.addKind === "disney") {
+      const data = await api("/api/stream", { link: input, name: name || null, play: false });
+      toast(data.message);
+      await load();
     } else {
       applyShows(await api("/api/shows/add", { kind: state.addKind, input, name }));
       const added = state.shows.find((s) => !before.has(s.id));
@@ -896,6 +1015,8 @@ const newID = () => Array.from({ length: 4 }, () => Math.random().toString(16).s
 function openEditor(id) {
   const show = showByID(id);
   if (!show) return;
+  state.sheetSave = saveEditing;
+  $("sheet-save").textContent = t("Sichern");
   state.editing = JSON.parse(JSON.stringify(show));
   renderEditor();
   api("/api/presets").then((data) => {
@@ -908,6 +1029,7 @@ function openEditor(id) {
 
 function closeEditor() {
   state.editing = null;
+  state.sheetSave = null;
   $("sheet").hidden = true;
   document.body.classList.remove("sheet-open");
 }
@@ -940,10 +1062,11 @@ function renderEditor() {
   head.appendChild(showArtwork(show, "art-large"));
   const meta = el("div", "sheet-meta");
   meta.appendChild(el("div", "sheet-kind", kindName(show)));
-  const source = show.kind === "joyn" ? `https://www.joyn.de/serien/${show.id}`
+  const source = show.source ? show.source : show.kind === "joyn" ? `https://www.joyn.de/serien/${show.id}`
     : show.kind === "youtube" && show.channel ? `https://www.youtube.com/channel/${show.channel}` : null;
   if (source) {
-    const link = el("a", "sheet-link", show.kind === "joyn" ? "Auf Joyn ansehen" : "Kanal auf YouTube");
+    const link = el("a", "sheet-link", show.source ? `Auf ${kindName(show)} ansehen`
+      : show.kind === "joyn" ? "Auf Joyn ansehen" : "Kanal auf YouTube");
     link.href = source;
     link.target = "_blank";
     link.rel = "noopener";
@@ -966,7 +1089,7 @@ function renderEditor() {
   group.appendChild(list);
   body.appendChild(group);
 
-  if (show.kind === "custom") {
+  if (isCollection(show) && show.kind !== "movies") {
     body.appendChild(el("h3", "form-title", show.id === YOUTUBE_VIDEOS ? "Videos" : "Links"));
     const links = el("div", "form-group");
     show.links.forEach((link, index) => {
@@ -1049,6 +1172,7 @@ function renderEditor() {
     keyList.insertBefore(row, keyList.firstChild);
   }
   body.appendChild(keyList);
+  renderCustomButtonsEditor(body, show);
   const savePreset = el("button", "form-add");
   savePreset.type = "button";
   savePreset.appendChild(icon("plus"));
@@ -1073,6 +1197,127 @@ function removeButton(action) {
   button.appendChild(icon("minus"));
   button.addEventListener("click", action);
   return button;
+}
+
+// ---------- Eigene Knöpfe ----------
+
+// Symbole wie in der Mac-App (ButtonIcon.all) – hier als Emoji
+const BUTTON_ICONS = [
+  ["star", "⭐"], ["heart", "❤️"], ["next", "⏭️"], ["previous", "⏮️"], ["skip", "⏩"], ["rewind", "⏪"],
+  ["faster", "🐇"], ["slower", "🐢"], ["restart", "🔄"], ["play", "▶️"], ["pause", "⏸️"], ["stop", "⏹️"],
+  ["repeat", "🔁"], ["shuffle", "🔀"], ["theater", "🎬"], ["pip", "🖼️"], ["captions", "💬"], ["audio", "🔊"],
+  ["info", "ℹ️"], ["menu", "📋"], ["settings", "⚙️"], ["home", "🏠"], ["back", "↩️"], ["ok", "✅"],
+  ["close", "❌"], ["bolt", "⚡"], ["flag", "🚩"], ["bookmark", "🔖"], ["tv", "📺"], ["game", "🎮"],
+];
+const iconEmoji = (id) => (BUTTON_ICONS.find(([key]) => key === id) || BUTTON_ICONS[0])[1];
+
+// Tasten zur Auswahl (macOS-Tastencodes), da man auf dem iPhone keine Taste aufnehmen kann
+const KEY_CHOICES = [
+  [49, "Leertaste"], [36, "⏎"], [53, "esc"], [48, "⇥"], [123, "←"], [124, "→"], [126, "↑"], [125, "↓"],
+  [115, "Pos1"], [119, "Ende"], [116, "Bild↑"], [121, "Bild↓"], [43, ","], [47, "."], [27, "-"],
+  ...[["A", 0], ["B", 11], ["C", 8], ["D", 2], ["E", 14], ["F", 3], ["G", 5], ["H", 4], ["I", 34], ["J", 38],
+    ["K", 40], ["L", 37], ["M", 46], ["N", 45], ["O", 31], ["P", 35], ["Q", 12], ["R", 15], ["S", 1], ["T", 17],
+    ["U", 32], ["V", 9], ["W", 13], ["X", 7], ["Y", 16], ["Z", 6]].map(([label, code]) => [code, label]),
+  ...[[0, 29], [1, 18], [2, 19], [3, 20], [4, 21], [5, 23], [6, 22], [7, 26], [8, 28], [9, 25]].map(([n, code]) => [code, String(n)]),
+];
+const MODIFIERS = [[0, ""], [131072, "⇧"], [262144, "⌃"], [524288, "⌥"], [1048576, "⌘"]];
+
+// Vorschläge wie in der Mac-App (CustomButton.suggestions)
+const SHIFT = 131072;
+const BUTTON_SUGGESTIONS = {
+  youtube: [
+    ["Nächstes Video", "next", 45, "N", SHIFT], ["Vorheriges Video", "previous", 35, "P", SHIFT],
+    ["Schneller", "faster", 47, ".", SHIFT], ["Langsamer", "slower", 43, ",", SHIFT],
+    ["Zum Anfang", "restart", 29, "0", 0], ["Kinomodus", "theater", 17, "T", 0], ["Miniplayer", "pip", 34, "I", 0],
+  ],
+  joyn: [["Vollbild verlassen", "close", 53, "esc", 0], ["Bestätigen", "ok", 36, "⏎", 0]],
+  movies: [["Vollbild verlassen", "close", 53, "esc", 0], ["Bestätigen", "ok", 36, "⏎", 0]],
+  custom: [["Bestätigen", "ok", 36, "⏎", 0], ["Zurück", "back", 53, "esc", 0]],
+};
+
+function keyBinding(code, keyLabel, modifiers) {
+  const symbol = MODIFIERS.find(([value]) => value === modifiers)?.[1] || "";
+  return { kind: "key", keyCode: code, modifiers, label: symbol + keyLabel };
+}
+
+function renderCustomButtonsEditor(body, show) {
+  show.controls.customButtons = show.controls.customButtons || [];
+  const buttons = show.controls.customButtons;
+  body.appendChild(el("h3", "form-title", "Eigene Knöpfe"));
+  const group = el("div", "form-group");
+  if (!buttons.length) group.appendChild(el("div", "form-empty", "Noch keine eigenen Knöpfe."));
+  buttons.forEach((button, index) => {
+    const row = el("div", "custom-row");
+    const iconSelect = el("select", "custom-icon-select");
+    for (const [id, emoji] of BUTTON_ICONS) iconSelect.appendChild(new Option(emoji, id, false, id === button.icon));
+    iconSelect.addEventListener("change", () => { button.icon = iconSelect.value; });
+    const name = textInput(button.title, t("Name"), (value) => { button.title = value; });
+    const keySelect = el("select", "form-select custom-key");
+    keySelect.appendChild(new Option(t("Doppelklick Bildmitte"), "double"));
+    keySelect.appendChild(new Option(t("Nichts"), "none"));
+    for (const [code, label] of KEY_CHOICES) keySelect.appendChild(new Option(t(label), String(code)));
+    keySelect.value = button.binding.kind === "key" ? String(button.binding.keyCode)
+      : button.binding.kind === "doubleClick" ? "double" : "none";
+    if (button.binding.kind === "key" && keySelect.value !== String(button.binding.keyCode)) {
+      keySelect.appendChild(new Option(button.binding.label, String(button.binding.keyCode)));
+      keySelect.value = String(button.binding.keyCode);
+    }
+    const modSelect = el("select", "form-select custom-mod");
+    for (const [value, symbol] of MODIFIERS) modSelect.appendChild(new Option(symbol || "–", String(value)));
+    modSelect.value = String(button.binding.modifiers || 0);
+    modSelect.hidden = button.binding.kind !== "key";
+    const update = () => {
+      if (keySelect.value === "double") button.binding = { kind: "doubleClick", label: "Doppelklick Bildmitte" };
+      else if (keySelect.value === "none") button.binding = { kind: "none", label: "Keine" };
+      else {
+        const code = Number(keySelect.value);
+        const label = KEY_CHOICES.find(([c]) => c === code)?.[1] || button.binding.label;
+        button.binding = keyBinding(code, label, Number(modSelect.value));
+      }
+      modSelect.hidden = button.binding.kind !== "key";
+    };
+    keySelect.addEventListener("change", update);
+    modSelect.addEventListener("change", update);
+    const keys = el("div", "custom-keys");
+    keys.append(modSelect, keySelect);
+    const fields = el("div", "custom-fields");
+    fields.append(name, keys);
+    row.append(iconSelect, fields, removeButton(() => { buttons.splice(index, 1); renderEditor(); }));
+    group.appendChild(row);
+  });
+  const add = el("button", "form-add");
+  add.type = "button";
+  add.appendChild(icon("plus"));
+  add.appendChild(el("span", "", "Knopf hinzufügen"));
+  add.addEventListener("click", () => {
+    buttons.push({ id: newID(), title: t("Neuer Knopf"), icon: "star", binding: keyBinding(49, "Leertaste", 0) });
+    renderEditor();
+  });
+  group.appendChild(add);
+  const existing = new Set(buttons.map((b) => b.title));
+  const suggestions = (BUTTON_SUGGESTIONS[show.id === YOUTUBE_VIDEOS ? "youtube" : show.kind] || [])
+    .filter(([title]) => !existing.has(title) && !existing.has(t(title)));
+  if (suggestions.length) {
+    const row = el("label", "form-row");
+    row.appendChild(el("span", "form-label", "Vorschlag"));
+    const select = el("select", "form-select");
+    select.appendChild(new Option(t("Auswählen …"), ""));
+    suggestions.forEach(([title, iconID, code, keyLabel, mods], i) => {
+      const label = (MODIFIERS.find(([v]) => v === mods)?.[1] || "") + keyLabel;
+      select.appendChild(new Option(`${iconEmoji(iconID)} ${t(title)} (${label})`, String(i)));
+    });
+    select.addEventListener("change", () => {
+      const s = suggestions[Number(select.value)];
+      if (!s) return;
+      buttons.push({ id: newID(), title: t(s[0]), icon: s[1], binding: keyBinding(s[2], s[3], s[4]) });
+      renderEditor();
+    });
+    row.appendChild(select);
+    group.appendChild(row);
+  }
+  body.appendChild(group);
+  body.appendChild(el("p", "hint hint-below",
+    "Erscheinen in der Fernbedienung, solange diese Show läuft – z. B. „Nächstes Video“ mit ⇧N bei YouTube."));
 }
 
 async function saveAsPreset() {
@@ -1202,7 +1447,7 @@ function renderSeasons() {
     return;
   }
   const list = seasons();
-  box.hidden = state.search !== "" || list.length < 2 || (currentShow()?.kind ?? "joyn") !== "joyn";
+  box.hidden = state.search !== "" || list.length < 2 || !currentShow() || !hasSeasons(currentShow());
   for (const season of list) {
     const button = el("button", "", `Staffel ${season}`);
     button.setAttribute("role", "tab");
@@ -1225,17 +1470,19 @@ function renderEpisodes() {
       .includes(query));
   } else if (show?.kind === "youtube") {
     list = episodesOf(show.id).filter((e) => groupOf(e) === state.group);
-  } else if (show && show.kind !== "joyn") {
+  } else if (show && !hasSeasons(show)) {
     list = episodesOf(show.id);
   } else {
     list = episodesOf(state.show).filter((e) => e.season === state.season);
   }
 
   // YouTube-Kanäle und Filme als Raster mit großen Vorschaubildern
-  const asGrid = !query && (show?.kind === "youtube" || show?.kind === "movies" || show?.id === YOUTUBE_VIDEOS);
+  const asGrid = !query && (show?.kind === "youtube" || show?.kind === "movies" || show?.id === YOUTUBE_VIDEOS
+    || STREAMING.includes(show?.kind));
   // Bei Filmen und der Sammlung "YouTube-Videos" lässt sich direkt ein Link einfügen
   const linkTarget = show?.kind === "movies" ? "Joyn-Filmlink einfügen (joyn.de/filme/…)"
-    : show?.id === YOUTUBE_VIDEOS ? "YouTube-Link einfügen" : null;
+    : show?.id === YOUTUBE_VIDEOS ? "YouTube-Link einfügen"
+    : show && STREAMING.includes(show.kind) && isCollection(show) ? `${kindName(show)}-Link einfügen` : null;
   $("link-form").hidden = query !== "" || !linkTarget;
   $("history-clear").hidden = query !== "" || show?.id !== YOUTUBE_VIDEOS || !episodesOf(YOUTUBE_VIDEOS).length;
   if (linkTarget) $("link-form").querySelector("input").placeholder = linkTarget;
@@ -1326,8 +1573,10 @@ async function startLink(event) {
     request = api("/api/youtube", { video: link, play: true });
   } else if (/joyn\.de\/(play\/)?filme\//i.test(link)) {
     request = api("/api/movies", { movie: link, play: true });
+  } else if (/netflix\.com|primevideo\.|amazon\.[a-z.]+\/(gp\/video|dp)|disneyplus\.com|disney\.plus/i.test(link)) {
+    request = api("/api/stream", { link, play: true });
   } else {
-    toast("Bitte einen YouTube-Link oder einen Joyn-Filmlink einfügen.", true);
+    toast("Bitte einen YouTube-, Joyn-, Netflix-, Prime-Video- oder Disney+-Link einfügen.", true);
     return;
   }
   button.disabled = true;
@@ -1353,6 +1602,17 @@ function renderNow() {
   $("subtitles").disabled = !subtitles || subtitles.kind === "none";
   $("subtitles").title = $("subtitles").disabled
     ? "Für diese Show gibt es keine Untertitel-Taste (z. B. Joyn)" : `Untertitel an/aus (${subtitles.label})`;
+  // Eigene Knöpfe der laufenden Show – in derselben Reihe wie Vollbild, Untertitel, Tab schließen
+  const row = document.querySelector(".transport-secondary");
+  row.querySelectorAll(".custom-button").forEach((b) => b.remove());
+  for (const button of lastShow?.controls?.customButtons || []) {
+    const pill = el("button", "pill pill-gray custom-button");
+    pill.appendChild(el("span", "custom-icon", iconEmoji(button.icon)));
+    pill.appendChild(el("span", "custom-title", button.title));
+    pill.title = `${button.title} (${button.binding.label})`;
+    pill.addEventListener("click", () => control("custom", button.id));
+    row.appendChild(pill);
+  }
   const last = lastPlayed();
   if (!last) return;
   const show = showByID(last.show);
@@ -1533,7 +1793,9 @@ function setup() {
     select.addEventListener("change", () => setSort(select.value));
   }
   $("sheet-cancel").addEventListener("click", closeEditor);
-  $("sheet-save").addEventListener("click", saveEditing);
+  $("sheet-save").addEventListener("click", () => (state.sheetSave || saveEditing)());
+  $("new-folder").addEventListener("click", () => openFolderCreator());
+  $("change-port").addEventListener("click", changePort);
   $("sheet").addEventListener("click", (event) => { if (event.target === $("sheet")) closeEditor(); });
   document.addEventListener("keydown", (event) => { if (event.key === "Escape" && state.editing) closeEditor(); });
   wide.addEventListener("change", render);

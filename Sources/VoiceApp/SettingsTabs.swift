@@ -31,14 +31,58 @@ struct PlaybackSettingsView: View {
     @EnvironmentObject private var model: EpisodeModel
     @State private var draft = ServerSettings()
     @State private var loaded = false
+    @State private var browsers: BrowsersResponse?
+    @State private var otherBrowser = false
     @State private var saveTask: Task<Void, Never>?
 
     private static let seasonChoices = [2, 3, 5, 10, 0]
+
+    /// Installierte Browser plus ein eingestellter, der nicht in der Liste steht
+    private var browserChoices: [String] {
+        var list = browsers?.browsers ?? []
+        if let browser = draft.browser, !list.contains(browser), !otherBrowser { list.append(browser) }
+        return list
+    }
     private static let refreshChoices = [15, 30, 60, 180, 720]
     private static let sleepChoices = [15, 30, 45, 60, 90, 120]
 
     var body: some View {
         Form {
+            Section {
+                Picker("Browser", selection: Binding(
+                    get: { otherBrowser ? "\u{0}other" : (draft.browser ?? "") },
+                    set: { value in
+                        if value == "\u{0}other" {
+                            otherBrowser = true
+                        } else {
+                            otherBrowser = false
+                            draft.browser = value.isEmpty ? nil : value
+                        }
+                    })) {
+                    Text("Wie bei der Installation").tag("")
+                    ForEach(browserChoices, id: \.self) { name in
+                        Text(name).tag(name)
+                    }
+                    Divider()
+                    Text("Anderer Browser …").tag("\u{0}other")
+                }
+                if otherBrowser {
+                    TextField("Name der App, z. B. Brave Browser", text: Binding(
+                        get: { draft.browser ?? "" }, set: { draft.browser = $0 }))
+                }
+                if let current = browsers?.current {
+                    Text("Zurzeit: \(current)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } header: {
+                Text("Browser am Mac mini")
+            } footer: {
+                Text("Netflix, Prime Video und Disney+ brauchen einen Browser mit Kopierschutz-Unterstützung (Firefox, Chrome, Safari, Edge, Brave …). Im gewählten Browser einmal bei den Diensten anmelden.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section {
                 Toggle("Automatisch Vollbild", isOn: $draft.autoFullscreen)
                 if draft.autoFullscreen {
@@ -122,6 +166,8 @@ struct PlaybackSettingsView: View {
         .task {
             await model.loadServerInfo()
             if let settings = model.serverSettings { draft = settings }
+            browsers = await model.loadBrowsers()
+            if let browser = draft.browser, !(browsers?.browsers.contains(browser) ?? true) { otherBrowser = true }
             loaded = true
         }
         .onChange(of: draft) { value in
@@ -385,6 +431,8 @@ struct MacMiniSettingsView: View {
     @State private var isWorking = false
     @State private var confirmRestart = false
     @State private var errorMessage: String?
+    @State private var portText = ""
+    @State private var confirmPort = false
 
     var body: some View {
         Form {
@@ -393,6 +441,16 @@ struct MacMiniSettingsView: View {
                     LabeledContent("Version", value: status.version == TVLauncher.version
                                    ? status.version : "\(status.version) (App: \(TVLauncher.version))")
                     LabeledContent("Rechner", value: status.host)
+                    LabeledContent("Port") {
+                        HStack(spacing: 8) {
+                            TextField("Port", text: $portText, prompt: Text(status.port.map(String.init) ?? "8081"))
+                                .frame(width: 80)
+                                .multilineTextAlignment(.trailing)
+                                .labelsHidden()
+                            Button("Ändern …") { confirmPort = true }
+                                .disabled(Int(portText) == nil || Int(portText) == status.port || isWorking)
+                        }
+                    }
                     LabeledContent("Browser", value: status.browser)
                     LabeledContent("Alte Tabs schließen") {
                         Text(status.closeOldTabs ? "an" : "aus")
@@ -452,7 +510,24 @@ struct MacMiniSettingsView: View {
         .formStyle(.grouped)
         .frame(width: 600)
         .fixedSize(horizontal: false, vertical: true)
-        .task { await model.loadServerInfo() }
+        .task {
+            await model.loadServerInfo()
+            portText = model.serverStatus?.port.map(String.init) ?? ""
+        }
+        .confirmationDialog("Port auf \(portText) ändern?", isPresented: $confirmPort) {
+            Button("Port ändern") {
+                guard let port = Int(portText) else { return }
+                isWorking = true
+                errorMessage = nil
+                Task {
+                    do { try await model.changePort(port) } catch { errorMessage = error.localizedDescription }
+                    portText = model.serverStatus?.port.map(String.init) ?? portText
+                    isWorking = false
+                }
+            }
+        } message: {
+            Text("Der Server startet auf dem neuen Port neu. Diese App stellt sich selbst um. In der Web-App auf dem iPhone die neue Adresse öffnen und neu zum Home-Bildschirm hinzufügen.")
+        }
         .confirmationDialog("Server neu starten?", isPresented: $confirmRestart) {
             Button("Neu starten") {
                 isWorking = true

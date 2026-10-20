@@ -25,15 +25,14 @@ DIR="$USER_HOME/TheVoiceServer"
 PLIST="$USER_HOME/Library/LaunchAgents/$LABEL.plist"
 LOG="$USER_HOME/Library/Logs/TheVoiceServer.log"
 
-# Browser: keep an existing setting
+# Browser and port: keep existing settings
 BROWSER=""
 if [ -f "$PLIST" ]; then
   i=0
   while ARG="$(/usr/libexec/PlistBuddy -c "Print :ProgramArguments:$i" "$PLIST" 2>/dev/null)"; do
-    if [ "$ARG" = "--browser" ]; then
-      BROWSER="$(/usr/libexec/PlistBuddy -c "Print :ProgramArguments:$((i + 1))" "$PLIST" 2>/dev/null)"
-      break
-    fi
+    NEXT="$(/usr/libexec/PlistBuddy -c "Print :ProgramArguments:$((i + 1))" "$PLIST" 2>/dev/null)"
+    [ "$ARG" = "--browser" ] && BROWSER="$NEXT"
+    [ "$ARG" = "--port" ] && [ -n "$NEXT" ] && PORT="$NEXT"
     i=$((i + 1))
   done
 fi

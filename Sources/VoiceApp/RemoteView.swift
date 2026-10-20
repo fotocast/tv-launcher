@@ -29,16 +29,68 @@ struct TransportButtons: View {
     @EnvironmentObject private var model: EpisodeModel
     var size: CGFloat = 44
     var spacing: CGFloat = 14
+    /// Fernbedienung: Abspielknöpfe oben, alle weiteren (inkl. eigener Knöpfe) darunter
+    var twoRows = false
 
     var body: some View {
-        HStack(spacing: spacing) {
-            button(.back, icon: "gobackward.10", help: "10 Sekunden zurück", scale: 1)
-            button(.playPause, icon: "playpause.fill", help: "Pause oder weiter", scale: 1.25, prominent: true)
-            button(.forward, icon: "goforward.10", help: "10 Sekunden vor", scale: 1)
-            button(.fullscreen, icon: "arrow.up.left.and.arrow.down.right", help: "Vollbild an/aus", scale: 1)
-            button(.subtitles, icon: "captions.bubble", help: subtitlesHelp, scale: 1)
-                .disabled(!hasSubtitles)
-            button(.closeTab, icon: "xmark.rectangle", help: "Browser-Tab am Mac mini schließen (⌘W)", scale: 1)
+        if twoRows {
+            VStack(spacing: spacing) {
+                HStack(spacing: spacing) { playback }
+                // Weitere Knöpfe zentriert: erste Reihe Standardknöpfe + bis zu 4 eigene, dann Reihen à 7
+                let customs = model.lastPlayedShow?.controls.customButtons ?? []
+                VStack(spacing: spacing * 0.6) {
+                    HStack(spacing: spacing * 0.6) {
+                        standardMore(scale: 0.75)
+                        customButtons(Array(customs.prefix(4)), scale: 0.75)
+                    }
+                    let rest = Array(customs.dropFirst(4))
+                    ForEach(Array(stride(from: 0, to: rest.count, by: 7)), id: \.self) { start in
+                        HStack(spacing: spacing * 0.6) {
+                            customButtons(Array(rest[start..<min(start + 7, rest.count)]), scale: 0.75)
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity)
+            }
+        } else {
+            HStack(spacing: spacing) {
+                playback
+                more(scale: 1)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var playback: some View {
+        button(.back, icon: "gobackward.10", help: "10 Sekunden zurück", scale: 1)
+        button(.playPause, icon: "playpause.fill", help: "Pause oder weiter", scale: 1.25, prominent: true)
+        button(.forward, icon: "goforward.10", help: "10 Sekunden vor", scale: 1)
+    }
+
+    /// Vollbild, Untertitel, Tab schließen und die eigenen Knöpfe der laufenden Show – alle gleich
+    @ViewBuilder
+    private func more(scale: CGFloat) -> some View {
+        standardMore(scale: scale)
+        customButtons(model.lastPlayedShow?.controls.customButtons ?? [], scale: scale)
+    }
+
+    @ViewBuilder
+    private func standardMore(scale: CGFloat) -> some View {
+        button(.fullscreen, icon: "arrow.up.left.and.arrow.down.right", help: "Vollbild an/aus", scale: scale)
+        button(.subtitles, icon: "captions.bubble", help: subtitlesHelp, scale: scale)
+            .disabled(!hasSubtitles)
+        button(.closeTab, icon: "xmark.rectangle", help: "Browser-Tab am Mac mini schließen (⌘W)", scale: scale)
+    }
+
+    private func customButtons(_ buttons: [CustomButton], scale: CGFloat) -> some View {
+        ForEach(buttons) { custom in
+            Button {
+                Task { await model.press(custom) }
+            } label: {
+                Image(systemName: ButtonIcon.named(custom.icon).symbol)
+            }
+            .buttonStyle(RoundButtonStyle(size: size * scale))
+            .help("\(custom.title) (\(L(custom.binding.label)))")
         }
     }
 
@@ -142,7 +194,7 @@ struct RemoteView: View {
 
                 nowPlaying
 
-                TransportButtons(size: 76, spacing: 26)
+                TransportButtons(size: 76, spacing: 26, twoRows: true)
 
                 VolumeAndSleepBar()
 

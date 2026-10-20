@@ -132,6 +132,7 @@ public struct KeyPreset: Codable, Identifiable, Hashable, Sendable {
         KeyPreset(id: "builtin-joyn", name: "Joyn", controls: .joynDefault, builtIn: true),
         KeyPreset(id: "builtin-youtube", name: "YouTube", controls: .youtubeDefault, builtIn: true),
         KeyPreset(id: "builtin-custom", name: "Standard (Leertaste, Pfeile, F)", controls: .customDefault, builtIn: true),
+        KeyPreset(id: "builtin-streaming", name: "Netflix, Prime Video, Disney+", controls: .netflixDefault, builtIn: true),
     ]
 
     /// Kurzbeschreibung, z. B. "K · J/L · F · C · Start K nach 5 s"
@@ -153,6 +154,18 @@ public struct PresetsResponse: Codable, Sendable {
 public struct PresetRequest: Codable, Sendable {
     public var preset: KeyPreset
     public init(preset: KeyPreset) { self.preset = preset }
+}
+
+/// Einzelnen Netflix-, Prime-Video- oder Disney+-Link in der Sammlung des Dienstes merken und ggf. starten
+public struct StreamLinkRequest: Codable, Sendable {
+    public var link: String
+    public var name: String?
+    public var play: Bool
+    public init(link: String, name: String? = nil, play: Bool) {
+        self.link = link
+        self.name = name
+        self.play = play
+    }
 }
 
 /// Ordner umbenennen (`to`) oder auflösen (`to` leer) – betrifft alle Shows mit `folder == from`
@@ -185,6 +198,8 @@ public enum PlayerAction: String, Codable, CaseIterable, Sendable {
     case subtitles
     /// Aktuellen Browser-Tab schließen (immer ⌘W)
     case closeTab = "closetab"
+    /// Eigener Knopf der Show (`ControlRequest.button` = ID)
+    case custom
 
     public var label: String {
         switch self {
@@ -194,13 +209,19 @@ public enum PlayerAction: String, Codable, CaseIterable, Sendable {
         case .fullscreen: return "Vollbild"
         case .subtitles: return "Untertitel"
         case .closeTab: return "Tab schließen"
+        case .custom: return "Eigener Knopf"
         }
     }
 }
 
 public struct ControlRequest: Codable, Sendable {
     public var action: PlayerAction
-    public init(action: PlayerAction) { self.action = action }
+    /// Bei `action == .custom`: ID des eigenen Knopfs
+    public var button: String?
+    public init(action: PlayerAction, button: String? = nil) {
+        self.action = action
+        self.button = button
+    }
 }
 
 /// Eine Tastatur- oder Mauseingabe, die im Fernsteuer-Modus vom MacBook
@@ -345,7 +366,7 @@ public enum Discovery {
 
 /// Versionsnummer von App, Web-App und Server
 public enum TVLauncher {
-    public static let version = "1.3"
+    public static let version = "1.4"
 }
 
 /// Einstellungen, die auf dem Server gespeichert werden und für App und Web-App gelten.
@@ -360,14 +381,17 @@ public struct ServerSettings: Codable, Hashable, Sendable {
     public var joynSeasons: Int
     /// Wie oft YouTube-Kanäle neu geladen werden (Minuten)
     public var youtubeRefreshMinutes: Int
+    /// Browser am Mac mini (App-Name, z. B. "Firefox"); `nil` = wie bei der Installation festgelegt
+    public var browser: String?
 
     public init(autoFullscreen: Bool = false, fullscreenDelay: Double = 3, startVolume: Int? = nil,
-                joynSeasons: Int = 2, youtubeRefreshMinutes: Int = 30) {
+                joynSeasons: Int = 2, youtubeRefreshMinutes: Int = 30, browser: String? = nil) {
         self.autoFullscreen = autoFullscreen
         self.fullscreenDelay = fullscreenDelay
         self.startVolume = startVolume
         self.joynSeasons = joynSeasons
         self.youtubeRefreshMinutes = youtubeRefreshMinutes
+        self.browser = browser
     }
 
     public init(from decoder: Decoder) throws {
@@ -378,6 +402,7 @@ public struct ServerSettings: Codable, Hashable, Sendable {
         startVolume = try c.decodeIfPresent(Int.self, forKey: .startVolume)
         joynSeasons = try c.decodeIfPresent(Int.self, forKey: .joynSeasons) ?? d.joynSeasons
         youtubeRefreshMinutes = try c.decodeIfPresent(Int.self, forKey: .youtubeRefreshMinutes) ?? d.youtubeRefreshMinutes
+        browser = try c.decodeIfPresent(String.self, forKey: .browser)
     }
 
     /// Werte in sinnvolle Grenzen bringen
@@ -387,6 +412,8 @@ public struct ServerSettings: Codable, Hashable, Sendable {
         s.startVolume = s.startVolume.map { min(max($0, 0), 100) }
         s.joynSeasons = min(max(s.joynSeasons, 0), 50)
         s.youtubeRefreshMinutes = min(max(s.youtubeRefreshMinutes, 5), 24 * 60)
+        s.browser = s.browser?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.browser?.isEmpty == true { s.browser = nil }
         return s
     }
 }
@@ -394,6 +421,18 @@ public struct ServerSettings: Codable, Hashable, Sendable {
 public struct SettingsRequest: Codable, Sendable {
     public var settings: ServerSettings
     public init(settings: ServerSettings) { self.settings = settings }
+}
+
+/// Installierte Browser am Mac mini (`GET /api/browsers`)
+public struct BrowsersResponse: Codable, Sendable {
+    /// App-Namen, z. B. ["Firefox", "Google Chrome", "Safari"]
+    public var browsers: [String]
+    /// Der gerade benutzte Browser
+    public var current: String
+    public init(browsers: [String], current: String) {
+        self.browsers = browsers
+        self.current = current
+    }
 }
 
 /// Zustand des Servers für „Status & Wartung“
@@ -412,9 +451,11 @@ public struct ServerStatus: Codable, Sendable {
     public var muted: Bool?
     /// Sleep-Timer läuft bis
     public var sleepAt: Date?
+    /// Port, auf dem der Server läuft
+    public var port: Int?
 
     public init(version: String, host: String, browser: String, closeOldTabs: Bool, accessibility: Bool,
-                screenRecording: Bool, startedAt: Date, volume: Int?, muted: Bool?, sleepAt: Date?) {
+                screenRecording: Bool, startedAt: Date, volume: Int?, muted: Bool?, sleepAt: Date?, port: Int? = nil) {
         self.version = version
         self.host = host
         self.browser = browser
@@ -425,7 +466,14 @@ public struct ServerStatus: Codable, Sendable {
         self.volume = volume
         self.muted = muted
         self.sleepAt = sleepAt
+        self.port = port
     }
+}
+
+/// Server auf einen anderen Port umziehen (1024…65535). Der Server startet danach neu.
+public struct PortRequest: Codable, Sendable {
+    public var port: Int
+    public init(port: Int) { self.port = port }
 }
 
 /// Lautstärke: "up", "down", "mute" (umschalten) oder "set" mit `value`

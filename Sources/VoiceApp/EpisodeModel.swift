@@ -143,6 +143,11 @@ final class EpisodeModel: ObservableObject {
         episodes(for: show).filter { ($0.group ?? Episode.videos) == group }
     }
 
+    /// Hat die Show echte Staffeln? (Joyn-Serien, Netflix-/Prime-Serien – nicht Filme mit Staffel 0)
+    func hasSeasons(_ show: Show) -> Bool {
+        seasons(for: show).contains { $0 > 0 }
+    }
+
     func seasons(for show: Show) -> [Int] {
         Array(Set(episodes(for: show).map(\.season))).sorted(by: >)
     }
@@ -280,6 +285,12 @@ final class EpisodeModel: ObservableObject {
         }
     }
 
+    /// Installierte Browser am Mac mini und der gerade benutzte
+    func loadBrowsers() async -> BrowsersResponse? {
+        guard let client = client else { return nil }
+        return try? await client.get("api/browsers", as: BrowsersResponse.self)
+    }
+
     func saveServerSettings(_ settings: ServerSettings) async {
         guard let client = client else { return }
         do {
@@ -308,6 +319,23 @@ final class EpisodeModel: ObservableObject {
         } catch {
             errorMessage = String(localized: "Sleep-Timer: \(error.localizedDescription)")
         }
+    }
+
+    /// Server auf einen anderen Port umziehen und die eigene Server-Adresse anpassen
+    func changePort(_ port: Int) async throws {
+        guard let client = client else { throw ClientError(message: String(localized: "Ungültige Server-Adresse")) }
+        let response = try await client.changePort(port)
+        showStatus(response.message)
+        if var components = URLComponents(url: client.baseURL, resolvingAgainstBaseURL: false) {
+            components.port = port
+            if let url = components.url?.absoluteString {
+                UserDefaults.standard.set(url, forKey: AppSettings.serverKey)
+            }
+        }
+        // Der Server braucht ein paar Sekunden für den Neustart
+        try? await Task.sleep(nanoseconds: 4_000_000_000)
+        await loadServerInfo()
+        await load()
     }
 
     func restartServer() async throws {
@@ -413,6 +441,8 @@ final class EpisodeModel: ObservableObject {
     enum PlayableLink {
         case youtube(String)
         case joynMovie(String)
+        /// Netflix, Prime Video oder Disney+
+        case stream(String, Show.Kind)
 
         init?(_ text: String) {
             let input = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -422,6 +452,12 @@ final class EpisodeModel: ObservableObject {
             } else if let url = URL(string: input.contains("://") ? input : "https://\(input)"),
                       let slug = Show.joynMovie(in: url) {
                 self = .joynMovie(slug)
+            } else if Show.netflixID(in: input) != nil {
+                self = .stream(input, .netflix)
+            } else if Show.primeID(in: input) != nil {
+                self = .stream(input, .prime)
+            } else if Show.isDisneyLink(input) {
+                self = .stream(input, .disney)
             } else {
                 return nil
             }
@@ -431,6 +467,7 @@ final class EpisodeModel: ObservableObject {
             switch self {
             case .youtube: return String(localized: "YouTube-Video")
             case .joynMovie: return String(localized: "Joyn-Film")
+            case .stream(_, let kind): return ShowsSettingsView.kindName(kind)
             }
         }
     }
@@ -443,8 +480,35 @@ final class EpisodeModel: ObservableObject {
             try await addMovie(slug, play: true)
             lastPlayedRef = EpisodeRef(show: Show.moviesID, id: slug)
             playedAt[Show.moviesID] = Date()
-        case nil: throw ClientError(message: String(localized: "Kein YouTube-Video und kein Joyn-Film erkannt."))
+        case .stream(let link, _)?: try await addStreamLink(link, name: nil, play: true)
+        case nil: throw ClientError(message: String(localized: "Kein passender Link erkannt (YouTube, Joyn-Film, Netflix, Prime Video, Disney+)."))
         }
+    }
+
+    /// Netflix-, Prime-Video- oder Disney+-Link in der Sammlung des Dienstes merken, ggf. sofort starten
+    func addStreamLink(_ link: String, name: String?, play: Bool) async throws {
+        guard let client = client else { throw ClientError(message: String(localized: "Ungültige Server-Adresse")) }
+        let response = try await client.post("api/stream", StreamLinkRequest(link: link, name: name, play: play),
+                                              as: PlayResponse.self, timeout: 40)
+        await load()
+        showStatus(response.message)
+    }
+
+    /// Show aus einer Adresse anlegen (Netflix-/Prime-Serie usw.); gibt die ID der neuen Show zurück
+    @discardableResult
+    func addShow(kind: Show.Kind, input: String, name: String?) async throws -> String? {
+        guard let client = client else { throw ClientError(message: String(localized: "Ungültige Server-Adresse")) }
+        let before = Set(shows.map(\.id))
+        apply(try await client.post("api/shows/add", AddShowRequest(kind: kind, input: input, name: name),
+                                    as: ShowsResponse.self, timeout: 40))
+        let added = shows.first { !before.contains($0.id) }
+        if let added {
+            if let catalog = try? await client.catalog(show: added.id, refresh: false) {
+                episodesByShow[added.id] = catalog.episodes
+            }
+            showStatus(String(localized: "„\(added.name)“ hinzugefügt"))
+        }
+        return added?.id
     }
 
     /// Verlauf „YouTube-Videos“ leeren
@@ -478,10 +542,15 @@ final class EpisodeModel: ObservableObject {
         }
     }
 
-    func control(_ action: PlayerAction) async {
+    /// Eigenen Knopf der laufenden Show auslösen
+    func press(_ button: CustomButton) async {
+        await control(.custom, button: button.id)
+    }
+
+    func control(_ action: PlayerAction, button: String? = nil) async {
         guard let client = client else { return }
         do {
-            let response = try await client.control(action)
+            let response = try await client.control(action, button: button)
             showStatus(response.message)
             errorMessage = nil
         } catch {

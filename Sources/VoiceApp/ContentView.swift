@@ -20,11 +20,15 @@ struct ContentView: View {
     @State private var search = ""
     @State private var showMovieBrowser = false
     @State private var showYouTubeBrowser = false
+    /// Offener Browser für Netflix, Prime Video oder Disney+
+    @State private var streamingBrowser: Show.Kind?
     @AppStorage(AppSettings.showSortKey) private var showSortRaw = ShowSort.custom.rawValue
     @AppStorage(AppSettings.collapsedShowsKey) private var collapsedRaw = ""
     /// Rückfrage nach einem Ordnernamen: neuer Ordner für eine Show oder Umbenennen
     @State private var folderPrompt: FolderPrompt?
     @State private var folderName = ""
+    /// Neuer-Ordner-Dialog mit diesen Shows vorausgewählt
+    @State private var newFolderFor: Set<String>?
 
     enum FolderPrompt: Identifiable {
         case new(showID: String)
@@ -41,6 +45,7 @@ struct ContentView: View {
         switch kind {
         case .youtube: return String(localized: "Videos")
         case .movies: return String(localized: "Alle Filme")
+        case .netflix, .prime, .disney: return String(localized: "Alle Titel")
         default: return String(localized: "Alle Links")
         }
     }
@@ -148,6 +153,20 @@ struct ContentView: View {
                     .help("Joyn durchsuchen: Filme starten, Serien hinzufügen")
                 }
                 .buttonStyle(.bordered)
+                HStack(spacing: 8) {
+                    ForEach([Show.Kind.netflix, .prime, .disney], id: \.self) { service in
+                        Button {
+                            streamingBrowser = service
+                        } label: {
+                            Text(ShowsSettingsView.kindName(service))
+                                .lineLimit(1)
+                                .frame(maxWidth: .infinity)
+                        }
+                        .help("\(ShowsSettingsView.kindName(service)) durchsuchen und Titel am Fernseher starten")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
@@ -160,6 +179,14 @@ struct ContentView: View {
             Button("Abbrechen", role: .cancel) {}
         } message: {
             Text("Ordner fassen Shows in der Seitenleiste und in der Web-App zusammen.")
+        }
+        .sheet(isPresented: Binding(get: { newFolderFor != nil }, set: { if !$0 { newFolderFor = nil } })) {
+            NewFolderSheet(preselected: newFolderFor ?? [])
+                .environmentObject(model)
+        }
+        .sheet(item: $streamingBrowser) { service in
+            StreamingBrowserSheet(service: service) { id in selection = .show(id) }
+                .environmentObject(model)
         }
         .sheet(isPresented: $showYouTubeBrowser) {
             YouTubeBrowserSheet()
@@ -192,13 +219,17 @@ struct ContentView: View {
             Label("Alle Videos", systemImage: "play.rectangle.on.rectangle")
                 .badge(model.episodes(for: show).count)
                 .tag(SidebarItem.show(show.id))
-        } else if show.kind != .joyn {
+        } else if show.isLinkCollection {
             Label(Self.allLabel(show.kind), systemImage: Self.allIcon(show.kind))
                 .badge(model.episodes(for: show).count)
                 .tag(SidebarItem.show(show.id))
         } else if model.seasons(for: show).isEmpty {
             Label(model.isLoading ? "Lädt …" : "Keine Folgen gefunden", systemImage: "hourglass")
                 .foregroundStyle(.secondary)
+        } else if !model.hasSeasons(show) {
+            // Film (Netflix, Prime Video)
+            Label("Ansehen", systemImage: "play.rectangle")
+                .tag(SidebarItem.show(show.id))
         } else {
             ForEach(model.seasons(for: show), id: \.self) { season in
                 Label("Staffel \(season)", systemImage: "tv")
@@ -242,19 +273,7 @@ struct ContentView: View {
         Button("Nach unten verschieben") { move(show, by: 1) }
             .disabled(model.shows.last?.id == show.id && showSort == .custom)
         Divider()
-        Menu("In Ordner legen") {
-            ForEach(model.folders.filter { $0 != show.folder }, id: \.self) { folder in
-                Button(folder) { Task { await model.setFolder(show.id, folder) } }
-            }
-            if model.folders.contains(where: { $0 != show.folder }) { Divider() }
-            Button("Neuer Ordner …") {
-                folderName = ""
-                folderPrompt = .new(showID: show.id)
-            }
-        }
-        if show.folder != nil {
-            Button("Aus dem Ordner nehmen") { Task { await model.setFolder(show.id, nil) } }
-        }
+        MoveToFolderMenu(show: show) { newFolderFor = [show.id] }
         Divider()
         Button("Alle einklappen") { setAllCollapsed(true) }
         Button("Alle ausklappen") { setAllCollapsed(false) }
@@ -356,6 +375,8 @@ struct ContentView: View {
             }
             .pickerStyle(.inline)
             Divider()
+            Button("Neuer Ordner …") { newFolderFor = [] }
+            Divider()
             Button("Alle einklappen") { setAllCollapsed(true) }
             Button("Alle ausklappen") { setAllCollapsed(false) }
         } label: {
@@ -416,10 +437,16 @@ struct ContentView: View {
                 RemoteView()
             case .season(let showID, let season):
                 let show = model.show(showID)
-                EpisodeListView(title: String(localized: "\(show?.displayName ?? "") – Staffel \(season)"),
-                                episodes: show.map { model.episodes(for: $0).filter { $0.season == season } } ?? [],
-                                showContext: false)
-                    .playerBar()
+                let title = String(localized: "\(show?.displayName ?? "") – Staffel \(season)")
+                let episodes = show.map { model.episodes(for: $0).filter { $0.season == season } } ?? []
+                if show?.kind.isStreaming == true {
+                    // Netflix/Prime: Folgen mit Standbildern
+                    ThumbnailGridView(title: title, episodes: episodes)
+                        .playerBar()
+                } else {
+                    EpisodeListView(title: title, episodes: episodes, showContext: false)
+                        .playerBar()
+                }
             case .group(let showID, let group):
                 let show = model.show(showID)
                 ThumbnailGridView(title: "\(show?.displayName ?? "") – \(L(group))",
@@ -437,7 +464,7 @@ struct ContentView: View {
                             ToolbarItem { ClearYouTubeHistoryButton().disabled(episodes.isEmpty) }
                         }
                         .playerBar()
-                } else if show?.kind == .youtube || show?.kind == .movies {
+                } else if show?.kind == .youtube || show?.kind == .movies || show?.kind.isStreaming == true {
                     ThumbnailGridView(title: show?.displayName ?? "", episodes: episodes,
                                       emptyText: show?.kind == .movies
                                           ? "Noch keine Filme – links unten „Joyn“ öffnen oder einen Filmlink einfügen."
@@ -488,9 +515,11 @@ struct HomeView: View {
     }
 
     private var shows: [Show] { model.sortedShows(ShowSort(rawValue: showSortRaw) ?? .custom) }
-    private var series: [Show] { shows.filter { $0.kind == .joyn } }
+    private var series: [Show] { shows.filter { $0.kind == .joyn || ($0.kind.isStreaming && !$0.isLinkCollection) } }
     private var channels: [Show] { shows.filter { $0.kind == .youtube } }
-    private var customShows: [Show] { shows.filter { $0.kind == .custom && $0.id != Show.youtubeVideosID } }
+    private var customShows: [Show] {
+        shows.filter { ($0.kind == .custom && $0.id != Show.youtubeVideosID) || ($0.kind.isStreaming && $0.isLinkCollection) }
+    }
     private var movies: [Episode] { model.show(Show.moviesID).map { model.episodes(for: $0) } ?? [] }
     private var videos: [Episode] { model.show(Show.youtubeVideosID).map { model.episodes(for: $0) } ?? [] }
 
@@ -504,7 +533,7 @@ struct HomeView: View {
             let videos = model.episodes(for: show, group: Episode.videos)
             return Array((videos.isEmpty ? episodes : videos).prefix(6))
         }
-        if show.kind != .joyn { return Array(episodes.prefix(6)) }
+        if !model.hasSeasons(show) { return Array(episodes.prefix(6)) }
         guard let season = model.seasons(for: show).first else { return [] }
         return Array(episodes.filter { $0.season == season }.sorted { $0.number > $1.number }.prefix(6))
     }
@@ -523,7 +552,7 @@ struct HomeView: View {
                 }
                 if isVisible(.newest), let show = featuredShow, !newest.isEmpty {
                     VStack(alignment: .leading, spacing: 12) {
-                        Text(show.kind == .joyn
+                        Text(model.hasSeasons(show)
                              ? String(localized: "Neu in \(show.displayName) – Staffel \(model.seasons(for: show).first ?? 0)")
                              : show.kind == .youtube ? String(localized: "Neu auf \(show.displayName)") : show.displayName)
                             .font(.title2.weight(.semibold))
@@ -557,8 +586,9 @@ struct HomeView: View {
                 ForEach(series) { show in
                     let season = model.seasons(for: show).first
                     ShowCard(title: show.displayName, subtitle: seriesInfo(show), image: show.image,
-                             icon: "play.tv.fill", isRecent: isRecent(show)) {
-                        open(season.map { .season(show: show.id, season: $0) } ?? .show(show.id))
+                             icon: ShowsSettingsView.kindIcon(show.kind), isRecent: isRecent(show)) {
+                        open(model.hasSeasons(show) ? season.map { .season(show: show.id, season: $0) } ?? .show(show.id)
+                             : .show(show.id))
                     }
                 }
             }
@@ -591,8 +621,10 @@ struct HomeView: View {
             section("Eigene Shows") {
                 ForEach(customShows) { show in
                     let count = model.episodes(for: show).count
-                    ShowCard(title: show.displayName, subtitle: count == 1 ? String(localized: "1 Link") : String(localized: "\(count) Links"), image: nil,
-                             icon: "link", isRecent: isRecent(show)) {
+                    ShowCard(title: show.displayName,
+                             subtitle: count == 1 ? String(localized: "1 Link") : String(localized: "\(count) Links"),
+                             image: model.episodes(for: show).first?.thumbnail,
+                             icon: ShowsSettingsView.kindIcon(show.kind), isRecent: isRecent(show)) {
                         open(.show(show.id))
                     }
                 }
@@ -625,8 +657,9 @@ struct HomeView: View {
     private func seriesInfo(_ show: Show) -> String {
         let seasons = model.seasons(for: show)
         guard let newest = seasons.first else {
-            return model.isLoading ? String(localized: "Lädt …") : String(localized: "Joyn-Serie")
+            return model.isLoading ? String(localized: "Lädt …") : ShowsSettingsView.kindName(show.kind)
         }
+        guard model.hasSeasons(show) else { return ShowsSettingsView.kindName(show.kind) }
         let count = model.episodes(for: show).filter { $0.season == newest }.count
         return String(localized: "Staffel \(newest) · \(count) Folgen")
             + (seasons.count > 1 ? String(localized: " · \(seasons.count) Staffeln") : "")

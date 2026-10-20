@@ -45,6 +45,20 @@ public struct Episode: Codable, Identifiable, Hashable, Sendable {
         self.group = nil
     }
 
+    /// Folge mit allen Angaben (Netflix, Prime Video)
+    public init(id: String, season: Int, number: Int, title: String, subtitle: String, show: String,
+                url: String?, thumbnail: String?, group: String? = nil) {
+        self.id = id
+        self.season = season
+        self.number = number
+        self.title = title
+        self.subtitle = subtitle
+        self.show = show
+        self.url = url
+        self.thumbnail = thumbnail
+        self.group = group
+    }
+
     /// Folge aus einem eigenen Link
     public init(link: ShowLink, number: Int, show: String, subtitle: String? = nil) {
         self.id = link.id

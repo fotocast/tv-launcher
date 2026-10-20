@@ -168,6 +168,10 @@ struct APIClient {
         try await post("api/sleep", SleepRequest(minutes: minutes), as: ServerStatus.self, timeout: 10)
     }
 
+    func changePort(_ port: Int) async throws -> PlayResponse {
+        try await post("api/port", PortRequest(port: port), as: PlayResponse.self, timeout: 10)
+    }
+
     func restart() async throws {
         _ = try await post("api/restart", [String: String](), as: PlayResponse.self, timeout: 10)
     }
@@ -201,11 +205,11 @@ struct APIClient {
         return try await send(request, as: ShowsResponse.self)
     }
 
-    func control(_ action: PlayerAction) async throws -> PlayResponse {
-        try await post("api/control", ControlRequest(action: action), as: PlayResponse.self, timeout: 10)
+    func control(_ action: PlayerAction, button: String? = nil) async throws -> PlayResponse {
+        try await post("api/control", ControlRequest(action: action, button: button), as: PlayResponse.self, timeout: 10)
     }
 
-    private func post<Body: Encodable, T: Decodable>(_ path: String, _ body: Body, as type: T.Type,
+    func post<Body: Encodable, T: Decodable>(_ path: String, _ body: Body, as type: T.Type,
                                                       timeout: TimeInterval) async throws -> T {
         var request = URLRequest(url: baseURL.appendingPathComponent(path))
         request.httpMethod = "POST"

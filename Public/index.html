@@ -47,6 +47,9 @@
     <symbol id="i-mute" viewBox="0 0 24 24"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z" fill="currentColor"/><path d="M15.5 9.5l5 5M20.5 9.5l-5 5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></symbol>
     <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" fill="currentColor"/></symbol>
     <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4.3l2 2.2h8.7A1.5 1.5 0 0 1 21 8.7v9.8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5z" fill="currentColor"/></symbol>
+    <symbol id="i-netflix" viewBox="0 0 24 24"><path d="M7 3h3.2l3.6 10.5V3H17v18h-3.2L10.2 10.5V21H7z" fill="currentColor"/></symbol>
+    <symbol id="i-prime" viewBox="0 0 24 24"><path d="M8 4h5.2a5 5 0 0 1 0 10H11.2v6H8zm3.2 3v4h1.9a2 2 0 0 0 0-4z" fill="currentColor"/></symbol>
+    <symbol id="i-disney" viewBox="0 0 24 24"><text x="12" y="16.5" font-size="11" font-weight="800" text-anchor="middle" fill="currentColor" font-family="-apple-system, system-ui">D+</text></symbol>
     <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/><path d="M20 3v6h-6z" fill="currentColor"/></symbol>
   </svg>
 
@@ -127,11 +130,11 @@
       <div class="remote-col">
       <h2 class="section-title section-title-first">Video-Link abspielen</h2>
       <form id="remote-link-form" class="link-form">
-        <input type="url" inputmode="url" placeholder="YouTube- oder Joyn-Link"
+        <input type="url" inputmode="url" placeholder="Link: YouTube, Joyn, Netflix, Prime, Disney+"
                autocomplete="off" autocorrect="off" spellcheck="false">
         <button class="pill pill-accent" type="submit"><svg><use href="#i-play"/></svg>Abspielen</button>
       </form>
-      <p class="hint">Teilen → Link kopieren in der YouTube-App, hier einfügen – das Video startet am Fernseher.</p>
+      <p class="hint">In der App (YouTube, Netflix, Prime Video, Disney+) teilen → Link kopieren, hier einfügen – es startet am Fernseher.</p>
 
       <div id="now" class="now"></div>
 
@@ -231,6 +234,13 @@
           <input id="set-hero" class="switch" type="checkbox"></label>
       </div>
 
+      <h3 class="form-title">Browser am Mac mini</h3>
+      <div class="form-group">
+        <label class="form-row"><span class="form-label">Browser</span>
+          <select id="set-browser" class="form-select"></select></label>
+      </div>
+      <p class="hint hint-below">Netflix, Prime Video und Disney+ brauchen einen Browser mit Kopierschutz-Unterstützung. Im gewählten Browser einmal bei den Diensten anmelden.</p>
+
       <h3 class="form-title">Beim Start eines Videos</h3>
       <div class="form-group">
         <label class="form-row"><span class="form-label">Automatisch Vollbild</span>
@@ -277,6 +287,7 @@
       <div class="form-group" id="status-list"></div>
       <div class="form-group form-group-spaced">
         <button id="show-log" class="form-add" type="button">Log anzeigen</button>
+        <button id="change-port" class="form-add" type="button">Port ändern …</button>
         <button id="restart-server" class="form-add" type="button">Server neu starten</button>
       </div>
       <pre id="server-log" class="server-log" hidden></pre>
@@ -309,7 +320,10 @@
       <h2 class="section-title">Sortierung</h2>
       <div id="sort-segmented" class="segmented" role="tablist"></div>
 
-      <h2 class="section-title">Deine Shows</h2>
+      <div class="section-head">
+        <h2 class="section-title">Deine Shows</h2>
+        <button id="new-folder" class="text-button history-clear" type="button"><svg><use href="#i-folder"/></svg>Neuer Ordner</button>
+      </div>
       <ul id="manage-list" class="list"></ul>
       <p class="hint hint-below">Mit ↑ ↓ ordnest du die Shows (eigene Reihenfolge). Tippen öffnet die Show zum Bearbeiten.
         Tasten für Play/Pause, Spulen und Vollbild stellst du in der Mac-App ein.</p>

@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import ApplicationServices
 import CoreGraphics
 import VoiceCore
@@ -30,6 +31,7 @@ final class Router: @unchecked Sendable {
     private let autoPlay = AutoPlay()
     private let remoteInput = RemoteInput()
     private let youtube = YouTube()
+    private let streaming = Streaming()
     private let sleepTimer = SleepTimer()
     private let startedAt = Date()
     /// Nach dieser Zeit wird eine Joyn-Liste beim nächsten Abruf neu von joyn.de geladen.
@@ -60,10 +62,14 @@ final class Router: @unchecked Sendable {
             return .json(await state.settings)
         case ("POST", "/api/settings"):
             return await saveSettings(request)
+        case ("GET", "/api/browsers"):
+            return .json(BrowsersResponse(browsers: Self.installedBrowsers(), current: await currentBrowser()))
         case ("GET", "/api/status"):
             return .json(await status())
         case ("GET", "/api/log"):
             return log(lines: Int(request.queryValue("lines") ?? "") ?? 300)
+        case ("POST", "/api/port"):
+            return changePort(request)
         case ("POST", "/api/restart"):
             serverLog("Neustart angefordert – der Dienst startet gleich neu.")
             DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) { exit(0) }   // launchd startet neu (KeepAlive)
@@ -143,6 +149,8 @@ final class Router: @unchecked Sendable {
             await state.forgetPlayed(show: Show.youtubeVideosID)
             serverLog("YouTube-Verlauf gelöscht")
             return .json(await state.showsResponse)
+        case ("POST", "/api/stream"):
+            return await streamLink(request)
         case ("POST", "/api/youtube"):
             return await youtubeVideo(request)
         case ("POST", "/api/control"):
@@ -205,6 +213,46 @@ final class Router: @unchecked Sendable {
             return await save(show)
         case .movies:
             return .error("Filme bitte über /api/movies hinzufügen.", status: 400)
+        case .netflix:
+            guard let titleID = Show.netflixID(in: input) else {
+                return .error("Kein Netflix-Titel erkannt. Erwartet wird eine Adresse wie netflix.com/title/…", status: 400)
+            }
+            if let existing = await state.show("netflix-\(titleID)") {
+                return .error("„\(existing.name)“ ist schon vorhanden.", status: 400)
+            }
+            do {
+                let title = try await streaming.netflix(titleID: titleID, show: "netflix-\(titleID)")
+                var show = Show.netflix(titleID: titleID, name: name.isEmpty ? title.name : name)
+                show.image = title.image
+                show.folder = body.folder
+                let response = await save(show)
+                await state.setEpisodes(title.episodes, for: show.id)
+                return response
+            } catch {
+                return .error(error.localizedDescription, status: 400)
+            }
+        case .prime:
+            guard let pageID = Show.primeID(in: input) else {
+                return .error("Kein Prime-Video-Titel erkannt. Erwartet wird eine Adresse wie primevideo.com/detail/…",
+                              status: 400)
+            }
+            if let existing = await state.show("prime-\(pageID.lowercased())") {
+                return .error("„\(existing.name)“ ist schon vorhanden.", status: 400)
+            }
+            do {
+                let showID = "prime-\(pageID.lowercased())"
+                let title = try await streaming.prime(pageID: pageID, show: showID)
+                var show = Show.prime(pageID: pageID, name: name.isEmpty ? title.name : name)
+                show.image = title.image
+                show.folder = body.folder
+                let response = await save(show)
+                await state.setEpisodes(title.episodes, for: show.id)
+                return response
+            } catch {
+                return .error(error.localizedDescription, status: 400)
+            }
+        case .disney:
+            return .error("Disney+-Titel bitte als Link hinzufügen (Sofort abspielen / Sammlung „Disney+“).", status: 400)
         }
     }
 
@@ -247,8 +295,15 @@ final class Router: @unchecked Sendable {
             }
             show.links = []
             if show.image == nil { show.image = await Self.joynSeriesImage(show.id) }
-        case .custom, .movies:
-            guard show.kind == .movies ? show.id == Show.moviesID : show.id.hasPrefix("custom-") else {
+        case .netflix where show.source != nil, .prime where show.source != nil:
+            guard show.id.hasPrefix("netflix-") || show.id.hasPrefix("prime-") else {
+                return .error("Ungültige Show-ID.", status: 400)
+            }
+            show.links = []
+        case .custom, .movies, .netflix, .prime, .disney:
+            let validID = show.kind == .movies ? show.id == Show.moviesID
+                : show.kind == .custom ? show.id.hasPrefix("custom-") : show.id.hasPrefix("stream-")
+            guard validID else {
                 return .error("Ungültige Show-ID.", status: 400)
             }
             show.links = show.links.map { link in
@@ -282,10 +337,11 @@ final class Router: @unchecked Sendable {
 
     private func episodes(showID: String, force: Bool) async -> HTTPResponse {
         guard let show = await state.show(showID) else { return .error("Unbekannte Show", status: 404) }
+        if show.isLinkCollection { return .json(await state.response(for: show)) }
         switch show.kind {
-        case .custom, .movies: return .json(await state.response(for: show))
         case .youtube: return await youtubeEpisodes(show, force: force)
-        case .joyn: break
+        case .netflix, .prime: return await streamingEpisodes(show, force: force)
+        default: break
         }
 
         let settings = await state.settings
@@ -309,6 +365,91 @@ final class Router: @unchecked Sendable {
             }
         }
         return .json(await state.response(for: show))
+    }
+
+    /// Netflix/Prime Video: Folgen von der öffentlichen Titelseite, alle 12 Stunden neu
+    private func streamingEpisodes(_ show: Show, force: Bool) async -> HTTPResponse {
+        let stored = await state.catalog(for: show.id)
+        let isEmpty = stored?.episodes.isEmpty ?? true
+        let isStale = stored?.updatedAt.map { Date().timeIntervalSince($0) > 12 * 3600 } ?? true
+        if force || isStale || isEmpty, let source = show.source {
+            do {
+                let title = show.kind == .netflix
+                    ? try await streaming.netflix(titleID: Show.netflixID(in: source) ?? "", show: show.id)
+                    : try await streaming.prime(pageID: Show.primeID(in: source) ?? "", show: show.id)
+                await state.setEpisodes(title.episodes, for: show.id)
+                serverLog("\(show.name): \(title.episodes.count) Folgen geladen")
+            } catch {
+                serverLog("\(show.name): Aktualisierung fehlgeschlagen: \(error.localizedDescription)")
+                if isEmpty { return .error(error.localizedDescription, status: 502) }
+            }
+        }
+        return .json(await state.response(for: show))
+    }
+
+    /// Einzelner Netflix-, Prime-Video- oder Disney+-Link: in der Sammlung des Dienstes merken, ggf. starten
+    private func streamLink(_ request: HTTPRequest) async -> HTTPResponse {
+        guard let body = try? JSONCoding.decoder.decode(StreamLinkRequest.self, from: request.body) else {
+            return .error("Erwartet wird {\"link\": \"<Adresse>\", \"play\": true}", status: 400)
+        }
+        let input = body.link.trimmingCharacters(in: .whitespacesAndNewlines)
+        let kind: Show.Kind
+        let id: String
+        let playURL: String
+        var title: String?
+        var image: String?
+        if let titleID = Show.netflixID(in: input) {
+            kind = .netflix
+            id = titleID
+            // /watch/<Titel-ID> setzt eine Serie dort fort, wo man aufgehört hat
+            playURL = "https://www.netflix.com/watch/\(titleID)"
+            if let info = try? await streaming.netflix(titleID: titleID, show: "stream-netflix") {
+                title = info.name
+                image = info.image
+            }
+        } else if let pageID = Show.primeID(in: input) {
+            kind = .prime
+            id = pageID
+            playURL = "https://www.primevideo.com/detail/\(pageID)?autoplay=1&t=0"
+            if let info = try? await streaming.prime(pageID: pageID, show: "stream-prime") {
+                title = info.name
+                image = info.image
+            }
+        } else if Show.isDisneyLink(input), let url = URL(string: input.contains("://") ? input : "https://\(input)") {
+            kind = .disney
+            id = url.path.split(separator: "/").last.map(String.init) ?? UUID().uuidString.lowercased()
+            playURL = url.absoluteString
+            let info = await streaming.pageInfo(playURL)
+            title = info.title.flatMap { $0.contains("Disney+") && $0.count < 12 ? nil : $0 }
+            image = info.image
+        } else {
+            return .error("Kein Netflix-, Prime-Video- oder Disney+-Link erkannt.", status: 400)
+        }
+        let name = (body.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        var collection = await state.show(Show.streamCollection(kind).id) ?? Show.streamCollection(kind)
+        let existing = collection.links.first { $0.id == id }
+        collection.links.removeAll { $0.id == id }
+        let link = ShowLink(id: id,
+                            title: !name.isEmpty ? name : existing?.title ?? title ?? String(localizedTitle(kind)),
+                            url: playURL, image: existing?.image ?? image, note: existing?.note)
+        collection.links.insert(link, at: 0)
+        collection.links = Array(collection.links.prefix(100))
+        await state.upsert(collection)
+        guard body.play else {
+            return .json(PlayResponse(ok: true, message: "„\(link.title)“ zu \(collection.name) hinzugefügt"))
+        }
+        guard let episode = collection.customEpisodes.first(where: { $0.id == id }) else {
+            return .error("Titel nicht gefunden", status: 404)
+        }
+        return await start(episode, of: collection)
+    }
+
+    private func localizedTitle(_ kind: Show.Kind) -> String {
+        switch kind {
+        case .netflix: return "Netflix-Titel"
+        case .prime: return "Prime-Video-Titel"
+        default: return "Disney+-Titel"
+        }
     }
 
     /// YouTube: die neuesten Videos, neu geladen im eingestellten Abstand (Standard 30 Minuten)
@@ -352,7 +493,7 @@ final class Router: @unchecked Sendable {
         guard let url = episode.playURL else { return .error("Ungültige Adresse", status: 400) }
         do {
             await autoPlay.cancel()
-            try Player.open(url, browser: config.browser, closeOldTabs: config.closeOldTabs)
+            try Player.open(url, browser: await currentBrowser(), closeOldTabs: config.closeOldTabs)
             await state.setLastPlayed(EpisodeRef(show: show.id, id: episode.id))
             serverLog("Spiele \(show.name): \(episode.code) \(episode.title)")
             let settings = await state.settings
@@ -365,7 +506,7 @@ final class Router: @unchecked Sendable {
                 steps.append((show.controls.fullscreen, wait))
             }
             if steps.contains(where: { $0.0.kind != .none }) {
-                let (autoPlay, browser) = (self.autoPlay, config.browser)
+                let (autoPlay, browser) = (self.autoPlay, await currentBrowser())
                 Task { await autoPlay.sequence(steps, browser: browser) }
             } else {
                 await autoPlay.cancel()
@@ -526,6 +667,19 @@ final class Router: @unchecked Sendable {
 
     // MARK: - Einstellungen, Status & Wartung
 
+    /// Browser für Videos: Einstellung, sonst der bei der Installation festgelegte
+    private func currentBrowser() async -> String {
+        await state.settings.browser ?? config.browser
+    }
+
+    /// Alle Apps, die https-Adressen öffnen können (= installierte Browser), als App-Namen
+    static func installedBrowsers() -> [String] {
+        guard let url = URL(string: "https://example.com") else { return [] }
+        let names = NSWorkspace.shared.urlsForApplications(toOpen: url)
+            .map { $0.deletingPathExtension().lastPathComponent }
+        return Array(Set(names)).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    }
+
     private func saveSettings(_ request: HTTPRequest) async -> HTTPResponse {
         guard let body = try? JSONCoding.decoder.decode(SettingsRequest.self, from: request.body) else {
             return .error("Erwartet wird {\"settings\": {...}}", status: 400)
@@ -534,6 +688,10 @@ final class Router: @unchecked Sendable {
         await state.setSettings(body.settings)
         let new = await state.settings
         serverLog("Einstellungen gesichert")
+        if new.browser != old.browser {
+            serverLog("Browser: \(await currentBrowser())")
+            if (await currentBrowser()).lowercased() == "firefox" { FirefoxSetup.apply() }
+        }
         // Andere Staffelzahl: Joyn-Serien im Hintergrund neu laden
         if new.joynSeasons != old.joynSeasons {
             Task {
@@ -548,10 +706,79 @@ final class Router: @unchecked Sendable {
     private func status() async -> ServerStatus {
         let volume = Player.volume()
         return ServerStatus(version: TVLauncher.version, host: ProcessInfo.processInfo.hostName,
-                            browser: config.browser, closeOldTabs: config.closeOldTabs,
+                            browser: await currentBrowser(), closeOldTabs: config.closeOldTabs,
                             accessibility: AXIsProcessTrusted(), screenRecording: CGPreflightScreenCaptureAccess(),
                             startedAt: startedAt, volume: volume?.volume, muted: volume?.muted,
-                            sleepAt: await sleepTimer.endsAt)
+                            sleepAt: await sleepTimer.endsAt, port: Int(config.port))
+    }
+
+    /// Anderen Port einstellen: prüft, ob er frei ist, trägt ihn in den Dienst (LaunchAgent) ein und startet neu
+    private func changePort(_ request: HTTPRequest) -> HTTPResponse {
+        guard let body = try? JSONCoding.decoder.decode(PortRequest.self, from: request.body) else {
+            return .error("Erwartet wird {\"port\": 8081}", status: 400)
+        }
+        let port = body.port
+        guard (1024...65535).contains(port) else {
+            return .error("Bitte einen Port zwischen 1024 und 65535 wählen.", status: 400)
+        }
+        guard port != Int(config.port) else {
+            return .json(PlayResponse(ok: true, message: "Der Server läuft schon auf Port \(port)."))
+        }
+        guard Self.isPortFree(UInt16(port)) else {
+            return .error("Port \(port) ist am Mac mini schon belegt.", status: 409)
+        }
+        let plist = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents/io.github.fotocast.tvlauncher.server.plist")
+        guard let data = try? Data(contentsOf: plist),
+              var dict = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              var args = dict["ProgramArguments"] as? [String] else {
+            return .error("Der Dienst wurde nicht gefunden – der Port lässt sich nur bei installiertem Server ändern.",
+                          status: 500)
+        }
+        if let index = args.firstIndex(of: "--port"), index + 1 < args.count {
+            args[index + 1] = String(port)
+        } else {
+            args += ["--port", String(port)]
+        }
+        dict["ProgramArguments"] = args
+        do {
+            let out = try PropertyListSerialization.data(fromPropertyList: dict, format: .xml, options: 0)
+            try out.write(to: plist, options: .atomic)
+        } catch {
+            return .error("Dienst konnte nicht geändert werden: \(error.localizedDescription)", status: 500)
+        }
+        serverLog("Port wird geändert: \(config.port) → \(port), Neustart …")
+        // launchd liest die geänderte plist erst beim erneuten Laden: ein losgelöster Hilfsprozess (eigene
+        // Sitzung per setsid, damit er das Beenden des Dienstes übersteht) lädt den Dienst neu.
+        let label = "io.github.fotocast.tvlauncher.server"
+        let domain = "gui/\(getuid())"
+        let script = "sleep 1; /bin/launchctl bootout \(domain)/\(label); sleep 1; "
+            + "/bin/launchctl bootstrap \(domain) '\(plist.path)'"
+        let helper = Process()
+        helper.executableURL = URL(fileURLWithPath: "/usr/bin/perl")
+        helper.arguments = ["-e", "use POSIX qw(setsid); setsid(); exec('/bin/sh', '-c', $ARGV[0]);", script]
+        do {
+            try helper.run()
+        } catch {
+            return .error("Neustart fehlgeschlagen: \(error.localizedDescription)", status: 500)
+        }
+        return .json(PlayResponse(ok: true, message: "Server startet auf Port \(port) neu …"))
+    }
+
+    /// Ist der Port frei? (Versuch, ihn kurz selbst zu belegen)
+    private static func isPortFree(_ port: UInt16) -> Bool {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = port.bigEndian
+        address.sin_addr = in_addr(s_addr: INADDR_ANY)
+        let result = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+        }
+        return result == 0
     }
 
     /// Die letzten Zeilen des Server-Logs
@@ -584,7 +811,7 @@ final class Router: @unchecked Sendable {
                               + "keine Lautstärke-Taste. Bitte die Fernbedienung des Fernsehers nutzen.", status: 400)
             }
             do {
-                try Player.perform(binding, browser: config.browser)
+                try Player.perform(binding, browser: await currentBrowser())
             } catch {
                 return .error(error.localizedDescription, status: 500)
             }
@@ -606,7 +833,7 @@ final class Router: @unchecked Sendable {
         guard let body = try? JSONCoding.decoder.decode(SleepRequest.self, from: request.body) else {
             return .error("Erwartet wird {\"minutes\": 30}", status: 400)
         }
-        let (state, browser) = (self.state, config.browser)
+        let (state, browser) = (self.state, await currentBrowser())
         await sleepTimer.start(minutes: body.minutes) {
             serverLog("Sleep-Timer abgelaufen: Pause und Display aus")
             if let last = await state.lastPlayed, let show = await state.show(last.show) {
@@ -642,14 +869,22 @@ final class Router: @unchecked Sendable {
         // Tasten der Show, die zuletzt gestartet wurde
         let showID = await state.lastPlayed?.show ?? Episode.series
         let show = await state.show(showID) ?? Show.theVoice
-        let binding = show.controls.binding(for: body.action)
+        var binding = show.controls.binding(for: body.action)
+        var label = body.action.label
+        if body.action == .custom {
+            guard let button = show.controls.customButtons.first(where: { $0.id == body.button }) else {
+                return .error("Diesen Knopf gibt es bei \(show.name) nicht (mehr).", status: 404)
+            }
+            binding = button.binding
+            label = button.title
+        }
         await autoPlay.cancel()
         do {
             guard binding.kind != .none else {
-                throw Player.NoBindingError(action: body.action.label, show: show.name)
+                throw Player.NoBindingError(action: label, show: show.name)
             }
-            try Player.perform(binding, browser: config.browser)
-            return .json(PlayResponse(ok: true, message: "\(body.action.label) (\(binding.label))"))
+            try Player.perform(binding, browser: await currentBrowser())
+            return .json(PlayResponse(ok: true, message: "\(label) (\(binding.label))"))
         } catch {
             return .error(error.localizedDescription, status: 500)
         }

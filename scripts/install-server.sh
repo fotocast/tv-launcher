@@ -33,7 +33,7 @@ scp -q "$BIN" "$TARGET:TheVoiceServer/VoiceServer.new"
 scp -q -r Public/. "$TARGET:TheVoiceServer/Public/"
 
 echo "==> Richte Dienst ein …"
-ssh "$TARGET" bash -s -- "$PORT" "$BROWSER" "$SPACE_DELAY" <<'REMOTE'
+REMOTE_OUTPUT="$(ssh "$TARGET" bash -s -- "$PORT" "$BROWSER" "$SPACE_DELAY" <<'REMOTE'
 set -e
 PORT="$1"; BROWSER="$2"; SPACE_DELAY="$3"
 cd ~/TheVoiceServer
@@ -41,6 +41,17 @@ mv -f VoiceServer.new VoiceServer
 chmod +x VoiceServer
 LABEL="io.github.fotocast.tvlauncher.server"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+# Einen in der App gewählten Port beibehalten
+if [ -f "$PLIST" ]; then
+  i=0
+  while ARG="$(/usr/libexec/PlistBuddy -c "Print :ProgramArguments:$i" "$PLIST" 2>/dev/null)"; do
+    if [ "$ARG" = "--port" ]; then
+      PORT="$(/usr/libexec/PlistBuddy -c "Print :ProgramArguments:$((i + 1))" "$PLIST" 2>/dev/null || echo "$PORT")"
+    fi
+    i=$((i + 1))
+  done
+fi
+echo "PORT=$PORT"
 cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -80,6 +91,9 @@ done
 echo "Server antwortet nicht. Log ansehen: tail ~/Library/Logs/TheVoiceServer.log"
 exit 1
 REMOTE
+)" || { echo "$REMOTE_OUTPUT"; exit 1; }
+echo "$REMOTE_OUTPUT" | grep -v "^PORT="
+PORT="$(echo "$REMOTE_OUTPUT" | sed -n 's/^PORT=//p' | tail -1)"
 
 echo "==> Prüfe Erreichbarkeit von diesem Mac …"
 if curl -fsS -m 5 "http://$MINI_HOST:$PORT/api/health" >/dev/null; then

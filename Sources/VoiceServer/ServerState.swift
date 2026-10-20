@@ -129,7 +129,7 @@ actor ServerState {
     }
 
     func response(for show: Show) -> CatalogResponse {
-        let catalog = show.kind == .custom || show.kind == .movies
+        let catalog = show.isLinkCollection
             ? Catalog(episodes: show.customEpisodes, updatedAt: nil)
             : data.catalogs[show.id] ?? Catalog(episodes: [], updatedAt: nil)
         return CatalogResponse(episodes: catalog.episodes, lastPlayedID: data.lastPlayedByShow[show.id],

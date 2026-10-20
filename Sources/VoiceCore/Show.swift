@@ -11,6 +11,15 @@ public struct Show: Codable, Identifiable, Hashable, Sendable {
         case youtube
         /// Gemerkte Joyn-Filme (eine Sammlung mit der ID `Show.moviesID`, Filme stehen in `links`)
         case movies
+        /// Netflix: Serie (`source` = Titelseite, Folgen werden gelesen) oder Sammlung einzelner Titel (`links`)
+        case netflix
+        /// Prime Video: Serie (`source` = Detailseite einer Staffel) oder Sammlung einzelner Titel (`links`)
+        case prime
+        /// Disney+: nur Sammlung einzelner Titel (`links`) – Disney+ zeigt ohne Anmeldung keine Inhalte
+        case disney
+
+        /// Streamingdienst mit Anmeldung (Netflix, Prime Video, Disney+)
+        public var isStreaming: Bool { self == .netflix || self == .prime || self == .disney }
     }
 
     public var id: String
@@ -26,9 +35,16 @@ public struct Show: Codable, Identifiable, Hashable, Sendable {
     public var image: String?
     /// Ordner, in dem die Show steht (`nil` = kein Ordner). Ordner gibt es nur über ihre Shows.
     public var folder: String?
+    /// Netflix/Prime Video: Adresse der Titel- bzw. Staffelseite, aus der die Folgen gelesen werden
+    public var source: String?
+
+    /// Streaming-Sammlung mit einzeln gemerkten Titeln (statt automatisch gelesener Folgen)
+    public var isLinkCollection: Bool {
+        kind == .custom || kind == .movies || (kind.isStreaming && source == nil)
+    }
 
     public init(id: String, name: String, kind: Kind, links: [ShowLink] = [], controls: ShowControls,
-                channel: String? = nil, image: String? = nil, folder: String? = nil) {
+                channel: String? = nil, image: String? = nil, folder: String? = nil, source: String? = nil) {
         self.id = id
         self.name = name
         self.kind = kind
@@ -37,6 +53,7 @@ public struct Show: Codable, Identifiable, Hashable, Sendable {
         self.channel = channel
         self.image = image
         self.folder = folder
+        self.source = source
     }
 
     public static func joyn(series: String, name: String) -> Show {
@@ -62,6 +79,63 @@ public struct Show: Codable, Identifiable, Hashable, Sendable {
     public static let youtubeVideosID = "custom-youtube-videos"
     public static let youtubeVideos = Show(id: youtubeVideosID, name: "YouTube-Videos", kind: .custom,
                                            controls: .youtubeDefault)
+
+    /// Sammlungen einzeln gemerkter Titel der Streamingdienste
+    public static func streamCollection(_ kind: Kind) -> Show {
+        switch kind {
+        case .netflix: return Show(id: "stream-netflix", name: "Netflix", kind: .netflix, controls: .netflixDefault)
+        case .prime: return Show(id: "stream-prime", name: "Prime Video", kind: .prime, controls: .primeDefault)
+        default: return Show(id: "stream-disney", name: "Disney+", kind: .disney, controls: .disneyDefault)
+        }
+    }
+
+    /// Netflix-Serie bzw. -Film mit automatisch gelesenen Folgen
+    public static func netflix(titleID: String, name: String) -> Show {
+        var show = Show(id: "netflix-\(titleID)", name: name, kind: .netflix, controls: .netflixDefault)
+        show.source = "https://www.netflix.com/title/\(titleID)"
+        return show
+    }
+
+    /// Prime-Video-Serie (eine Staffelseite) mit automatisch gelesenen Folgen
+    public static func prime(pageID: String, name: String) -> Show {
+        var show = Show(id: "prime-\(pageID.lowercased())", name: name, kind: .prime, controls: .primeDefault)
+        show.source = "https://www.primevideo.com/detail/\(pageID)"
+        return show
+    }
+
+    /// Netflix-Titel-ID aus /title/<id> oder /watch/<id>
+    public static func netflixID(in text: String) -> String? {
+        guard let url = URL(string: text.contains("://") ? text : "https://\(text)"),
+              let host = url.host?.lowercased(), host.hasSuffix("netflix.com") else { return nil }
+        // Im Netflix-Katalog öffnen sich Titel als Fenster: /browse?jbv=<id>
+        if let jbv = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
+            .first(where: { $0.name == "jbv" })?.value, !jbv.isEmpty, jbv.allSatisfy(\.isNumber) {
+            return jbv
+        }
+        let parts = url.path.split(separator: "/").map(String.init)
+        guard let index = parts.firstIndex(where: { $0 == "title" || $0 == "watch" }), index + 1 < parts.count,
+              parts[index + 1].allSatisfy(\.isNumber) else { return nil }
+        return parts[index + 1]
+    }
+
+    /// Prime-Video-Kennung aus /detail/<ID> (primevideo.com) oder /dp/<ASIN> bzw. /gp/video/detail/<ASIN> (amazon.de)
+    public static func primeID(in text: String) -> String? {
+        guard let url = URL(string: text.contains("://") ? text : "https://\(text)"),
+              let host = url.host?.lowercased(), host.contains("primevideo.") || host.contains("amazon.") else { return nil }
+        let parts = url.path.split(separator: "/").map(String.init)
+        guard let index = parts.firstIndex(where: { $0 == "detail" || $0 == "dp" }), index + 1 < parts.count else {
+            return nil
+        }
+        let id = parts[index + 1]
+        return id.range(of: "^[A-Z0-9]{10,}$", options: .regularExpression) != nil ? id : nil
+    }
+
+    /// Disney+-Adresse (jede Seite auf disneyplus.com)
+    public static func isDisneyLink(_ text: String) -> Bool {
+        guard let url = URL(string: text.contains("://") ? text : "https://\(text)"),
+              let host = url.host?.lowercased() else { return false }
+        return host.hasSuffix("disneyplus.com") || host.hasSuffix("disney.plus")
+    }
 
     /// Video-ID aus einem YouTube-Link (watch?v=, youtu.be/, /shorts/, /live/, /embed/) oder eine nackte ID
     public static func youtubeVideoID(in text: String) -> String? {
@@ -134,7 +208,7 @@ public struct Show: Codable, Identifiable, Hashable, Sendable {
     public var customEpisodes: [Episode] {
         links.enumerated().map {
             Episode(link: $0.element, number: $0.offset + 1, show: id,
-                    subtitle: kind == .movies ? "Joyn-Film" : $0.element.note)
+                    subtitle: kind == .movies ? "Joyn-Film" : $0.element.note ?? (kind.isStreaming ? name : nil))
         }
     }
 
@@ -226,10 +300,13 @@ public struct ShowControls: Codable, Hashable, Sendable {
     public var volumeUp: KeyBinding
     public var volumeDown: KeyBinding
     public var mute: KeyBinding
+    /// Eigene Knöpfe für die Fernbedienung (z. B. „Nächstes Video“ = ⇧N)
+    public var customButtons: [CustomButton]
 
     public init(playPause: KeyBinding, back: KeyBinding, forward: KeyBinding, fullscreen: KeyBinding,
                 start: KeyBinding, startDelay: Double, subtitles: KeyBinding = .none,
-                volumeUp: KeyBinding = .none, volumeDown: KeyBinding = .none, mute: KeyBinding = .none) {
+                volumeUp: KeyBinding = .none, volumeDown: KeyBinding = .none, mute: KeyBinding = .none,
+                customButtons: [CustomButton] = []) {
         self.playPause = playPause
         self.back = back
         self.forward = forward
@@ -240,6 +317,7 @@ public struct ShowControls: Codable, Hashable, Sendable {
         self.volumeUp = volumeUp
         self.volumeDown = volumeDown
         self.mute = mute
+        self.customButtons = customButtons
     }
 
     public init(from decoder: Decoder) throws {
@@ -254,6 +332,7 @@ public struct ShowControls: Codable, Hashable, Sendable {
         volumeUp = try c.decodeIfPresent(KeyBinding.self, forKey: .volumeUp) ?? .none
         volumeDown = try c.decodeIfPresent(KeyBinding.self, forKey: .volumeDown) ?? .none
         mute = try c.decodeIfPresent(KeyBinding.self, forKey: .mute) ?? .none
+        customButtons = try c.decodeIfPresent([CustomButton].self, forKey: .customButtons) ?? []
     }
 
     /// Joyn-Player: Leertaste, Pfeiltasten, Vollbild per Doppelklick, Start per Leertaste.
@@ -267,6 +346,16 @@ public struct ShowControls: Codable, Hashable, Sendable {
                                                     start: .key(40, "K"), startDelay: 5, subtitles: .c,
                                                     volumeUp: .key(126, "↑"), volumeDown: .key(125, "↓"),
                                                     mute: .key(46, "M"))
+    /// Netflix: Leertaste, ←/→ 10 s, F Vollbild, ↑/↓/M Lautstärke; Leertaste nach 8 s, weil Firefox Autoplay mit Ton blockiert
+    public static let netflixDefault = ShowControls(playPause: .space, back: .left, forward: .right,
+                                                    fullscreen: .key(3, "F"), start: .space, startDelay: 8,
+                                                    volumeUp: .key(126, "↑"), volumeDown: .key(125, "↓"),
+                                                    mute: .key(46, "M"))
+    /// Prime Video: wie Netflix
+    public static let primeDefault = netflixDefault
+    /// Disney+: wie Netflix
+    public static let disneyDefault = netflixDefault
+
     /// Eigene Shows: Leertaste, Pfeiltasten, F für Vollbild, nichts beim Start
     public static let customDefault = ShowControls(playPause: .space, back: .left, forward: .right,
                                                    fullscreen: .key(3, "F"), start: .none, startDelay: 5)
@@ -279,6 +368,107 @@ public struct ShowControls: Codable, Hashable, Sendable {
         case .fullscreen: return fullscreen
         case .subtitles: return subtitles
         case .closeTab: return .closeTab
+        case .custom: return .none   // eigene Knöpfe: siehe `customButtons`
         }
+    }
+}
+
+// MARK: - Eigene Knöpfe
+
+/// Eigener Knopf in der Fernbedienung: Name, Symbol und was am Mac gedrückt wird.
+public struct CustomButton: Codable, Identifiable, Hashable, Sendable {
+    public var id: String
+    public var title: String
+    /// Kennung aus `ButtonIcon.all`
+    public var icon: String
+    public var binding: KeyBinding
+
+    public init(id: String = UUID().uuidString.lowercased(), title: String, icon: String, binding: KeyBinding) {
+        self.id = id
+        self.title = title
+        self.icon = icon
+        self.binding = binding
+    }
+
+    private static let shift: UInt64 = 1 << 17
+
+    /// Vorschläge passend zur Art der Show
+    public static func suggestions(for kind: Show.Kind) -> [CustomButton] {
+        switch kind {
+        case .youtube:
+            return [
+                CustomButton(title: "Nächstes Video", icon: "next", binding: .key(45, "⇧N", modifiers: shift)),
+                CustomButton(title: "Vorheriges Video", icon: "previous", binding: .key(35, "⇧P", modifiers: shift)),
+                CustomButton(title: "Schneller", icon: "faster", binding: .key(47, "⇧.", modifiers: shift)),
+                CustomButton(title: "Langsamer", icon: "slower", binding: .key(43, "⇧,", modifiers: shift)),
+                CustomButton(title: "Zum Anfang", icon: "restart", binding: .key(29, "0")),
+                CustomButton(title: "Kinomodus", icon: "theater", binding: .key(17, "T")),
+                CustomButton(title: "Miniplayer", icon: "pip", binding: .key(34, "I")),
+            ]
+        case .joyn, .movies:
+            return [
+                CustomButton(title: "Vollbild verlassen", icon: "close", binding: .key(53, "esc")),
+                CustomButton(title: "Bestätigen", icon: "ok", binding: .key(36, "⏎")),
+            ]
+        case .custom:
+            return [
+                CustomButton(title: "Bestätigen", icon: "ok", binding: .key(36, "⏎")),
+                CustomButton(title: "Zurück", icon: "back", binding: .key(53, "esc")),
+            ]
+        case .netflix:
+            return [
+                CustomButton(title: "Intro überspringen", icon: "skip", binding: .key(1, "S")),
+                CustomButton(title: "Vollbild verlassen", icon: "close", binding: .key(53, "esc")),
+            ]
+        case .prime, .disney:
+            return [
+                CustomButton(title: "Vollbild verlassen", icon: "close", binding: .key(53, "esc")),
+                CustomButton(title: "Bestätigen", icon: "ok", binding: .key(36, "⏎")),
+            ]
+        }
+    }
+}
+
+/// Symbole für eigene Knöpfe: SF Symbol (Mac-App) und Emoji (Web-App)
+public struct ButtonIcon: Sendable, Hashable, Identifiable {
+    public let id: String
+    public let symbol: String
+    public let emoji: String
+
+    public static let all: [ButtonIcon] = [
+        .init(id: "star", symbol: "star.fill", emoji: "⭐"),
+        .init(id: "heart", symbol: "heart.fill", emoji: "❤️"),
+        .init(id: "next", symbol: "forward.end.fill", emoji: "⏭️"),
+        .init(id: "previous", symbol: "backward.end.fill", emoji: "⏮️"),
+        .init(id: "skip", symbol: "goforward", emoji: "⏩"),
+        .init(id: "rewind", symbol: "gobackward", emoji: "⏪"),
+        .init(id: "faster", symbol: "hare.fill", emoji: "🐇"),
+        .init(id: "slower", symbol: "tortoise.fill", emoji: "🐢"),
+        .init(id: "restart", symbol: "arrow.counterclockwise", emoji: "🔄"),
+        .init(id: "play", symbol: "play.fill", emoji: "▶️"),
+        .init(id: "pause", symbol: "pause.fill", emoji: "⏸️"),
+        .init(id: "stop", symbol: "stop.fill", emoji: "⏹️"),
+        .init(id: "repeat", symbol: "repeat", emoji: "🔁"),
+        .init(id: "shuffle", symbol: "shuffle", emoji: "🔀"),
+        .init(id: "theater", symbol: "rectangle.inset.filled", emoji: "🎬"),
+        .init(id: "pip", symbol: "pip.fill", emoji: "🖼️"),
+        .init(id: "captions", symbol: "captions.bubble.fill", emoji: "💬"),
+        .init(id: "audio", symbol: "speaker.wave.2.fill", emoji: "🔊"),
+        .init(id: "info", symbol: "info.circle.fill", emoji: "ℹ️"),
+        .init(id: "menu", symbol: "list.bullet", emoji: "📋"),
+        .init(id: "settings", symbol: "gearshape.fill", emoji: "⚙️"),
+        .init(id: "home", symbol: "house.fill", emoji: "🏠"),
+        .init(id: "back", symbol: "arrow.uturn.backward", emoji: "↩️"),
+        .init(id: "ok", symbol: "checkmark.circle.fill", emoji: "✅"),
+        .init(id: "close", symbol: "xmark.circle.fill", emoji: "❌"),
+        .init(id: "bolt", symbol: "bolt.fill", emoji: "⚡"),
+        .init(id: "flag", symbol: "flag.fill", emoji: "🚩"),
+        .init(id: "bookmark", symbol: "bookmark.fill", emoji: "🔖"),
+        .init(id: "tv", symbol: "tv.fill", emoji: "📺"),
+        .init(id: "game", symbol: "gamecontroller.fill", emoji: "🎮"),
+    ]
+
+    public static func named(_ id: String) -> ButtonIcon {
+        all.first { $0.id == id } ?? all[0]
     }
 }

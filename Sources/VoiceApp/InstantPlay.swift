@@ -15,7 +15,7 @@ struct InstantPlayField: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                TextField(compact ? "YouTube- oder Joyn-Link" : "YouTube- oder Joyn-Filmlink einfügen", text: $text)
+                TextField(compact ? "Link zum Abspielen" : "Link einfügen: YouTube, Joyn, Netflix, Prime Video, Disney+", text: $text)
                     .textFieldStyle(.roundedBorder)
                     .onSubmit { play(text) }
                 Button {

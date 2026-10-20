@@ -33,7 +33,14 @@ Your laptop / iPhone                   Mac connected to the TV (server)
 - **Manage shows from the iPhone or iPad**: add Joyn series, YouTube channels, Joyn movies and custom shows,
   rename, edit links, delete, reorder and sort (custom / recently watched / A–Z).
 - **iPad layout** with a sidebar like the Mac app, and a two-column remote in landscape.
+- **Netflix and Prime Video** series with all seasons and episodes (read from the public title pages),
+  **Disney+** titles as a link collection, a built-in browser for each service, and instant play for their links.
+  Prime Video episodes start their season with autoplay (single-episode links need a login).
+- **Choose the browser** on the TV Mac freely (Firefox, Chrome, Safari, Arc, …).
+- **Choose the server port** in the app or web app (checks that it's free and restarts the server on it).
 - **Folders** to group shows (e.g. "Talent shows", "YouTubers") – collapsible, in the Mac app and the web app.
+- **Custom buttons** per show with name, icon and key (e.g. "Next video" = ⇧N on YouTube) – shown in the remote
+  while the show is playing, in the Mac app and the web app.
 - **Key presets**: save a key layout under a name and apply it to any show (built-in: Joyn, YouTube, Standard).
 - **English and German** in the Mac app and the web app (Settings → Language).
 - **Settings** for auto fullscreen, start volume, number of Joyn seasons, YouTube refresh, home page sections,

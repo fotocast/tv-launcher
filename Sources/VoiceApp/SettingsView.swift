@@ -105,12 +105,17 @@ struct ShowsSettingsView: View {
     @State private var draft: Show?
     @State private var showBrowser = false
     @State private var showYouTube = false
+    @State private var streamingBrowser: Show.Kind?
     @AppStorage(AppSettings.showSortKey) private var showSortRaw = ShowSort.custom.rawValue
     @State private var errorMessage: String?
     @State private var isSaving = false
     @State private var confirmDelete = false
     @State private var askPresetName = false
     @State private var presetName = ""
+    /// Neuer-Ordner-Dialog (mit diesen Shows vorausgewählt)
+    @State private var newFolderFor: Set<String>?
+    @State private var renamingFolder: String?
+    @State private var folderName = ""
 
     private var saved: Show? { selection.flatMap(model.show) }
     private var hasChanges: Bool { draft != nil && draft != saved }
@@ -141,6 +146,10 @@ struct ShowsSettingsView: View {
             JoynBrowserSheet { id in selection = id }
                 .environmentObject(model)
         }
+        .sheet(item: $streamingBrowser) { service in
+            StreamingBrowserSheet(service: service) { id in selection = id }
+                .environmentObject(model)
+        }
         .sheet(isPresented: $showYouTube) {
             YouTubeBrowserSheet { id in selection = id }
                 .environmentObject(model)
@@ -159,6 +168,19 @@ struct ShowsSettingsView: View {
             if selection == nil { selection = model.shows.first?.id }
             draft = saved
         }
+        .sheet(isPresented: Binding(get: { newFolderFor != nil }, set: { if !$0 { newFolderFor = nil } })) {
+            NewFolderSheet(preselected: newFolderFor ?? [])
+                .environmentObject(model)
+        }
+        .alert("Ordner umbenennen", isPresented: Binding(get: { renamingFolder != nil },
+                                                        set: { if !$0 { renamingFolder = nil } })) {
+            TextField("Name des Ordners", text: $folderName)
+            Button("Sichern") {
+                let name = folderName.trimmingCharacters(in: .whitespaces)
+                if let old = renamingFolder, !name.isEmpty { Task { await model.renameFolder(old, to: name) } }
+            }
+            Button("Abbrechen", role: .cancel) {}
+        }
         .confirmationDialog("„\(saved?.name ?? "")“ löschen?", isPresented: $confirmDelete) {
             Button("Löschen", role: .destructive) { deleteSelected() }
         } message: {
@@ -171,30 +193,18 @@ struct ShowsSettingsView: View {
     private var showList: some View {
         VStack(spacing: 0) {
             List(selection: $selection) {
-                ForEach(model.shows) { show in
-                    Label {
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(show.name)
-                            Text(show.folder.map { "\(Self.kindName(show.kind)) · \($0)" } ?? Self.kindName(show.kind))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                // Zuerst Shows ohne Ordner, dann je Ordner eine Gruppe (in der eigenen Reihenfolge)
+                ForEach(folderGroups, id: \.id) { group in
+                    Section {
+                        ForEach(group.shows) { show in
+                            showRow(show)
                         }
-                    } icon: {
-                        Image(systemName: Self.kindIcon(show.kind))
-                    }
-                    .padding(.vertical, 3)
-                    .tag(show.id)
-                }
-                .onMove { from, to in
-                    var ids = model.shows.map(\.id)
-                    ids.move(fromOffsets: from, toOffset: to)
-                    // Angeordnet wird die eigene Reihenfolge – die Seitenleiste zeigt sie dann auch
-                    showSortRaw = ShowSort.custom.rawValue
-                    Task {
-                        do {
-                            try await model.reorderShows(ids)
-                        } catch {
-                            errorMessage = error.localizedDescription
+                        .onMove { from, to in move(in: group.shows, from: from, to: to) }
+                    } header: {
+                        if let folder = group.folder {
+                            folderHeader(folder, count: group.shows.count)
+                        } else if !model.folders.isEmpty {
+                            Text("Ohne Ordner")
                         }
                     }
                 }
@@ -205,6 +215,11 @@ struct ShowsSettingsView: View {
                 Menu {
                     Button("Joyn-Serie oder -Film suchen …") { showBrowser = true }
                     Button("YouTube-Kanal suchen …") { showYouTube = true }
+                    Divider()
+                    Button("Netflix-Serie oder -Film suchen …") { streamingBrowser = .netflix }
+                    Button("Prime-Video-Serie suchen …") { streamingBrowser = .prime }
+                    Button("Disney+-Titel merken …") { streamingBrowser = .disney }
+                    Divider()
                     Button("Eigene Show mit Links") { addCustomShow() }
                 } label: {
                     Image(systemName: "plus")
@@ -224,6 +239,15 @@ struct ShowsSettingsView: View {
                 .buttonStyle(.borderless)
                 .disabled(selection == nil)
                 .help("Ausgewählte Show löschen")
+
+                Button {
+                    newFolderFor = selection.map { [$0] } ?? []
+                } label: {
+                    Image(systemName: "folder.badge.plus")
+                        .frame(width: 28, height: 20)
+                }
+                .buttonStyle(.borderless)
+                .help("Neuer Ordner – Name eingeben und Shows ankreuzen")
                 Spacer()
                 Text("Ziehen zum Anordnen")
                     .font(.caption)
@@ -231,6 +255,85 @@ struct ShowsSettingsView: View {
                     .padding(.trailing, 4)
             }
             .padding(6)
+        }
+    }
+
+    // MARK: Ordner
+
+    private struct FolderGroup {
+        let folder: String?
+        let shows: [Show]
+        var id: String { folder.map { "folder:" + $0 } ?? "none" }
+    }
+
+    private var folderGroups: [FolderGroup] {
+        var groups = [FolderGroup(folder: nil, shows: model.shows.filter { $0.folder == nil })]
+        groups += model.folders.map { folder in FolderGroup(folder: folder, shows: model.shows.filter { $0.folder == folder }) }
+        return groups.filter { !$0.shows.isEmpty }
+    }
+
+    private func showRow(_ show: Show) -> some View {
+        Label {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(show.name)
+                Text(Self.kindName(show.kind))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        } icon: {
+            Image(systemName: Self.kindIcon(show.kind))
+        }
+        .padding(.vertical, 3)
+        .tag(show.id)
+        .contextMenu {
+            MoveToFolderMenu(show: show) { newFolderFor = [show.id] }
+        }
+    }
+
+    private func folderHeader(_ folder: String, count: Int) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "folder.fill")
+                .foregroundStyle(Color.accentColor)
+            Text(folder)
+            Text("\(count)")
+                .foregroundStyle(.secondary)
+            Spacer()
+            Menu {
+                Button("Ordner umbenennen …") {
+                    folderName = folder
+                    renamingFolder = folder
+                }
+                Button("Ordner auflösen") { Task { await model.renameFolder(folder, to: "") } }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+        }
+        .contextMenu {
+            Button("Ordner umbenennen …") {
+                folderName = folder
+                renamingFolder = folder
+            }
+            Button("Ordner auflösen") { Task { await model.renameFolder(folder, to: "") } }
+        }
+    }
+
+    /// Verschieben innerhalb einer Gruppe – die eigene Reihenfolge aller Shows wird daraus neu gebildet
+    private func move(in group: [Show], from: IndexSet, to: Int) {
+        var reordered = group.map(\.id)
+        reordered.move(fromOffsets: from, toOffset: to)
+        let members = Set(reordered)
+        var queue = reordered[...]
+        let ids = model.shows.map(\.id).map { id in members.contains(id) ? queue.removeFirst() : id }
+        showSortRaw = ShowSort.custom.rawValue
+        Task {
+            do {
+                try await model.reorderShows(ids)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -259,7 +362,14 @@ struct ShowsSettingsView: View {
                         .fixedSize()
                         .help("Vorhandenen Ordner wählen – oder einen neuen Namen eintippen")
                     }
-                    if show.wrappedValue.kind == .joyn, let url = show.wrappedValue.joynURL {
+                    if let source = show.wrappedValue.source, let url = URL(string: source) {
+                        LabeledContent(ShowsSettingsView.kindName(show.wrappedValue.kind)) {
+                            Link(url.absoluteString, destination: url)
+                        }
+                        Text("Folgen werden alle 12 Stunden von der öffentlichen Seite gelesen.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else if show.wrappedValue.kind == .joyn, let url = show.wrappedValue.joynURL {
                         LabeledContent("Joyn-Serie") {
                             Link(show.wrappedValue.id, destination: url)
                         }
@@ -302,7 +412,7 @@ struct ShowsSettingsView: View {
                     }
                 }
 
-                if show.wrappedValue.kind == .custom {
+                if show.wrappedValue.isLinkCollection && show.wrappedValue.kind != .movies {
                     Section {
                         ForEach(show.links) { $link in
                             HStack(spacing: 8) {
@@ -347,6 +457,62 @@ struct ShowsSettingsView: View {
                     Text("Tasten am Mac mini")
                 } footer: {
                     Text("Diese Tasten drückt der Mac mini, wenn du in der App oder Web-App die Knöpfe benutzt. Untertitel: YouTube C; Joyn hat keine Taste dafür. Lautstärke-Tasten werden nur genutzt, wenn der Mac die Lautstärke nicht selbst regeln kann (Ton über HDMI).")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section {
+                    if show.wrappedValue.controls.customButtons.isEmpty {
+                        Text("Noch keine eigenen Knöpfe.").foregroundStyle(.secondary)
+                    }
+                    ForEach(show.controls.customButtons) { $button in
+                        HStack(spacing: 8) {
+                            ButtonIconPicker(icon: $button.icon)
+                            TextField("Name", text: $button.title)
+                                .frame(minWidth: 120)
+                            Spacer()
+                            KeyBindingEditor(binding: $button.binding)
+                            Button {
+                                draft?.controls.customButtons.removeAll { $0.id == button.id }
+                            } label: {
+                                Image(systemName: "minus.circle.fill").foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Knopf entfernen")
+                        }
+                    }
+                    HStack {
+                        Button {
+                            draft?.controls.customButtons.append(
+                                CustomButton(title: String(localized: "Neuer Knopf"), icon: "star", binding: .space))
+                        } label: {
+                            Label("Knopf hinzufügen", systemImage: "plus.circle.fill")
+                        }
+                        .buttonStyle(.borderless)
+                        let existing = Set(show.wrappedValue.controls.customButtons.map(\.title))
+                        let suggestions = CustomButton.suggestions(for: show.wrappedValue.kind)
+                            .filter { !existing.contains(L($0.title)) && !existing.contains($0.title) }
+                        if !suggestions.isEmpty {
+                            Menu("Vorschläge") {
+                                ForEach(suggestions) { suggestion in
+                                    Button {
+                                        var button = suggestion
+                                        button.title = L(suggestion.title)
+                                        draft?.controls.customButtons.append(button)
+                                    } label: {
+                                        Label("\(L(suggestion.title)) (\(L(suggestion.binding.label)))",
+                                              systemImage: ButtonIcon.named(suggestion.icon).symbol)
+                                    }
+                                }
+                            }
+                            .menuStyle(.borderlessButton)
+                            .fixedSize()
+                        }
+                    }
+                } header: {
+                    Text("Eigene Knöpfe")
+                } footer: {
+                    Text("Erscheinen in der Fernbedienung (App und Web-App), solange diese Show läuft – z. B. „Nächstes Video“ mit ⇧N bei YouTube.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -449,6 +615,9 @@ struct ShowsSettingsView: View {
     static func kindName(_ kind: Show.Kind) -> String {
         switch kind {
         case .joyn: return String(localized: "Joyn-Serie")
+        case .netflix: return "Netflix"
+        case .prime: return "Prime Video"
+        case .disney: return "Disney+"
         case .youtube: return String(localized: "YouTube-Kanal")
         case .movies: return String(localized: "Joyn-Filme")
         case .custom: return String(localized: "Eigene Links")
@@ -458,6 +627,9 @@ struct ShowsSettingsView: View {
     static func kindIcon(_ kind: Show.Kind) -> String {
         switch kind {
         case .joyn: return "play.tv.fill"
+        case .netflix: return "n.square.fill"
+        case .prime: return "p.square.fill"
+        case .disney: return "d.square.fill"
         case .youtube: return "play.rectangle.fill"
         case .movies: return "film.fill"
         case .custom: return "link"

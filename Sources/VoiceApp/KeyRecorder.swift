@@ -22,19 +22,64 @@ struct KeyBindingRow: View {
 
     var body: some View {
         LabeledContent(LocalizedStringKey(title)) {
-            HStack(spacing: 8) {
-                Picker(LocalizedStringKey(title), selection: kind) {
-                    Text("Taste").tag(KeyBinding.Kind.key)
-                    Text("Doppelklick Bildmitte").tag(KeyBinding.Kind.doubleClick)
-                    Text("Nichts").tag(KeyBinding.Kind.none)
-                }
-                .labelsHidden()
-                .fixedSize()
-                if binding.kind == .key {
-                    KeyRecorder(binding: $binding)
+            KeyBindingEditor(binding: $binding)
+        }
+    }
+}
+
+/// Art der Aktion (Taste / Doppelklick / keine) und ggf. die Taste – ohne Beschriftung
+struct KeyBindingEditor: View {
+    @Binding var binding: KeyBinding
+
+    private var kind: Binding<KeyBinding.Kind> {
+        Binding(
+            get: { binding.kind },
+            set: { newKind in
+                switch newKind {
+                case .key: if binding.kind != .key { binding = .space }
+                case .doubleClick: binding = .doubleClick
+                case .none: binding = .none
                 }
             }
+        )
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Picker("Aktion", selection: kind) {
+                Text("Taste").tag(KeyBinding.Kind.key)
+                Text("Doppelklick Bildmitte").tag(KeyBinding.Kind.doubleClick)
+                Text("Nichts").tag(KeyBinding.Kind.none)
+            }
+            .labelsHidden()
+            .fixedSize()
+            if binding.kind == .key {
+                KeyRecorder(binding: $binding)
+            }
         }
+    }
+}
+
+/// Auswahl des Symbols für einen eigenen Knopf
+struct ButtonIconPicker: View {
+    @Binding var icon: String
+
+    var body: some View {
+        Menu {
+            ForEach(ButtonIcon.all) { item in
+                Button {
+                    icon = item.id
+                } label: {
+                    Label(item.id == icon ? "✓" : " ", systemImage: item.symbol)
+                }
+            }
+        } label: {
+            Image(systemName: ButtonIcon.named(icon).symbol)
+                .frame(width: 22)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Symbol wählen")
     }
 }
 

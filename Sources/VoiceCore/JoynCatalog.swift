@@ -62,8 +62,8 @@ public actor JoynCatalog {
         self.known = loaded
     }
 
-    /// Lädt neu von joyn.de und gibt aktuelle + vorherige Staffel zurück.
-    public func refresh() async throws -> [Episode] {
+    /// Lädt neu von joyn.de und gibt die neuesten `seasonCount` Staffeln zurück (0 = alle; Standard: aktuelle + vorherige).
+    public func refresh(seasonCount: Int = 2) async throws -> [Episode] {
         // 1. Serienseite -> aktuelle Staffel
         let seriesHTML = try await fetch("\(Self.base)/serien/\(series)")
         var found = Self.episodes(in: seriesHTML, series: series)
@@ -76,50 +76,65 @@ public actor JoynCatalog {
         }
         merge(found)
 
-        // 3. Vorherige Staffel (nur suchen, wenn noch nicht bekannt)
-        let previous = current - 1
-        if previous > 0, !known.values.contains(where: { $0.season == previous }),
-           let seed = await findSeed(season: previous) {
-            merge([seed])
-            if let html = try? await fetch(seed.pageURL.absoluteString) {
-                merge(Self.episodes(in: html, series: series))
+        // 3. Ältere Staffeln (nur suchen, wenn noch nicht bekannt) – die Sitemap wird dafür nur einmal gelesen
+        let oldest = Self.oldestSeason(current: current, count: seasonCount)
+        let missing = Set((oldest..<current).filter { season in !known.values.contains { $0.season == season } })
+        if !missing.isEmpty {
+            for seed in await findSeeds(seasons: missing).values {
+                merge([seed])
+                if let html = try? await fetch(seed.pageURL.absoluteString) {
+                    merge(Self.episodes(in: html, series: series))
+                }
             }
         }
 
         save()
-        logger("\(series): Folgen geladen, Staffel \(current) und \(previous)")
-        return selection(current: current)
+        logger("\(series): Folgen geladen, Staffel \(current)" + (oldest < current ? " bis \(oldest)" : ""))
+        return selection(current: current, count: seasonCount)
     }
 
     /// Letzter bekannter Stand ohne Netzwerkzugriff.
-    public func cachedSelection() -> [Episode] {
+    public func cachedSelection(seasonCount: Int = 2) -> [Episode] {
         guard let current = known.values.map(\.season).max() else { return [] }
-        return selection(current: current)
+        return selection(current: current, count: seasonCount)
     }
 
     // MARK: - Intern
 
-    private func selection(current: Int) -> [Episode] {
-        known.values
-            .filter { $0.season == current || $0.season == current - 1 }
+    /// Älteste anzuzeigende Staffel (`count` 0 = alle)
+    static func oldestSeason(current: Int, count: Int) -> Int {
+        count <= 0 ? 1 : max(1, current - count + 1)
+    }
+
+    private func selection(current: Int, count: Int) -> [Episode] {
+        let oldest = Self.oldestSeason(current: current, count: count)
+        return known.values
+            .filter { $0.season >= oldest && $0.season <= current }
             .sorted(by: Episode.displayOrder)
     }
 
-    private func findSeed(season: Int) async -> Episode? {
-        logger("\(series): Suche Staffel \(season) in der Joyn-Sitemap …")
-        let needle = "/serien/\(series)/\(season)-"
+    /// Sucht für jede Staffel eine Folge in der Joyn-Sitemap (alle Staffeln in einem Durchgang).
+    private func findSeeds(seasons: Set<Int>) async -> [Int: Episode] {
+        logger("\(series): Suche Staffel \(seasons.sorted(by: >).map(String.init).joined(separator: ", ")) in der Joyn-Sitemap …")
+        var result: [Int: Episode] = [:]
         if let index = try? await fetch("\(Self.base)/sitemap.xml") {
             let maps = Self.matches(of: "<loc>\\s*([^<\\s]*sitemap\\.episode[^<\\s]*)\\s*</loc>", in: index)
-            for map in maps {
-                guard let xml = try? await fetch(map), xml.contains(needle) else { continue }
-                if let episode = Self.episodes(in: xml, series: series).first(where: { $0.season == season }) {
-                    return episode
+            for map in maps where result.count < seasons.count {
+                guard let xml = try? await fetch(map), xml.contains("/serien/\(series)/") else { continue }
+                for episode in Self.episodes(in: xml, series: series)
+                where seasons.contains(episode.season) && result[episode.season] == nil {
+                    result[episode.season] = episode
                 }
             }
         }
-        if let slug = Self.fallbackSeeds[series]?[season] { return Episode(slug: slug, series: series) }
-        logger("\(series): Staffel \(season) nicht gefunden.")
-        return nil
+        for season in seasons where result[season] == nil {
+            if let slug = Self.fallbackSeeds[series]?[season] {
+                result[season] = Episode(slug: slug, series: series)
+            } else {
+                logger("\(series): Staffel \(season) nicht gefunden.")
+            }
+        }
+        return result
     }
 
     /// Fügt Folgen hinzu. Hat Joyn den Slug einer Folge geändert, ersetzt der neue den alten.

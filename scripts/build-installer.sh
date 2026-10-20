@@ -1,14 +1,14 @@
 #!/bin/bash
-# Baut das Installer-Paket dist/TV-Launcher-<Version>.pkg für beide Seiten:
-#   - App (Fernbedienung) → /Applications/TV Launcher.app
-#   - Server (Mac am Fernseher) → ~/TheVoiceServer + Dienst (per postinstall für den angemeldeten Benutzer)
+# Baut zwei einfache Installer (deutsch/englisch je nach Sprache des Macs):
+#   dist/TV-Launcher-App-<Version>.pkg    → /Applications/TV Launcher.app (öffnet sich danach)
+#   dist/TV-Launcher-Server-<Version>.pkg → Mac am Fernseher: ~/TheVoiceServer + Dienst, Bluetooth-Assistent aus,
+#                                           öffnet Systemeinstellungen → Bedienungshilfen
 # Universal (Intel + Apple Silicon), ab macOS 13.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/AppInfo.plist)"
 BUILD="$(date +%Y%m%d%H%M)"
 WORK="dist/installer-work"
-OUT="dist/TV-Launcher-$VERSION.pkg"
 
 echo "==> Baue App und Server (Intel + Apple Silicon) …"
 swift build -c release --arch arm64 --arch x86_64
@@ -28,6 +28,7 @@ strip -S -x "$APP/Contents/MacOS/VoiceApp"
 cp Resources/AppInfo.plist "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "$APP/Contents/Info.plist"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+cp -R Resources/*.lproj "$APP/Contents/Resources/"
 codesign --force --deep -s - "$APP"
 cp installer/uninstall.sh "$APP_ROOT/$SUPPORT/uninstall.sh"
 
@@ -60,35 +61,30 @@ pkgbuild --root "$SRV_ROOT" --install-location / \
   --scripts installer/server-scripts --identifier io.github.fotocast.tvlauncher.pkg.server --version "$VERSION" \
   "$WORK/server.pkg" >/dev/null
 
-cat > "$WORK/distribution.xml" <<XML
+# Ein Installer pro Seite – ohne Auswahl, damit nichts schiefgehen kann
+make_installer() {   # $1 = app|server, $2 = Titel, $3 = Ausgabedatei
+  cat > "$WORK/$1-distribution.xml" <<XML
 <?xml version="1.0" encoding="utf-8"?>
 <installer-gui-script minSpecVersion="2">
-  <title>TV Launcher</title>
+  <title>$2</title>
   <welcome file="welcome.html" mime-type="text/html"/>
   <conclusion file="conclusion.html" mime-type="text/html"/>
-  <options customize="always" require-scripts="false" hostArchitectures="x86_64,arm64"/>
+  <options customize="never" require-scripts="false" hostArchitectures="x86_64,arm64"/>
   <domains enable_localSystem="true"/>
   <volume-check>
     <allowed-os-versions><os-version min="13.0"/></allowed-os-versions>
   </volume-check>
-  <choices-outline>
-    <line choice="app"/>
-    <line choice="server"/>
-  </choices-outline>
-  <choice id="app" title="App (remote control)" start_selected="true"
-          description="The Mac app to start and control playback. For the Mac you sit at.">
-    <pkg-ref id="io.github.fotocast.tvlauncher.pkg.app"/>
-  </choice>
-  <choice id="server" title="Server (Mac connected to the TV)" start_selected="false"
-          description="Only select this on the Mac connected to the TV. Starts at login, opens videos in the browser and serves the iPhone web app (port 8081).">
-    <pkg-ref id="io.github.fotocast.tvlauncher.pkg.server"/>
-  </choice>
-  <pkg-ref id="io.github.fotocast.tvlauncher.pkg.app" version="$VERSION">app.pkg</pkg-ref>
-  <pkg-ref id="io.github.fotocast.tvlauncher.pkg.server" version="$VERSION">server.pkg</pkg-ref>
+  <choices-outline><line choice="main"/></choices-outline>
+  <choice id="main" title="$2"><pkg-ref id="io.github.fotocast.tvlauncher.pkg.$1"/></choice>
+  <pkg-ref id="io.github.fotocast.tvlauncher.pkg.$1" version="$VERSION">$1.pkg</pkg-ref>
 </installer-gui-script>
 XML
+  productbuild --distribution "$WORK/$1-distribution.xml" --resources "installer/resources/$1" \
+    --package-path "$WORK" "$3" >/dev/null
+  echo "==> Fertig: $(pwd)/$3"
+}
 
-productbuild --distribution "$WORK/distribution.xml" --resources installer/resources \
-  --package-path "$WORK" "$OUT" >/dev/null
+rm -f dist/TV-Launcher-*.pkg
+make_installer app "TV Launcher" "dist/TV-Launcher-App-$VERSION.pkg"
+make_installer server "TV Launcher Server" "dist/TV-Launcher-Server-$VERSION.pkg"
 rm -rf "$WORK"
-echo "==> Fertig: $(pwd)/$OUT"

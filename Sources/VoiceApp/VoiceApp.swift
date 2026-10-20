@@ -18,6 +18,7 @@ struct TVLauncherApp: App {
                 .frame(minWidth: 820, idealWidth: 1000, minHeight: 560, idealHeight: 720)
         }
         .windowToolbarStyle(.unified)
+        .commands { PlaybackCommands(model: model) }
         Settings {
             SettingsView()
                 .environmentObject(model)

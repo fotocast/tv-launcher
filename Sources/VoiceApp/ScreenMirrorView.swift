@@ -4,6 +4,7 @@ import AppKit
 /// Bildschirmfoto des Mac mini zum Anklicken (Modus "Bildschirm anklicken").
 struct ScreenMirrorView: View {
     @EnvironmentObject private var forwarder: InputForwarder
+    @AppStorage(AppSettings.screenshotIntervalKey) private var interval = AppSettings.defaultScreenshotInterval
 
     var body: some View {
         VStack(spacing: 10) {
@@ -19,6 +20,15 @@ struct ScreenMirrorView: View {
                         .font(.callout.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
+                Picker("Aktualisieren", selection: $interval) {
+                    ForEach(AppSettings.screenshotIntervals, id: \.self) { seconds in
+                        Text(AppSettings.intervalLabel(seconds).prefix(1).uppercased()
+                             + AppSettings.intervalLabel(seconds).dropFirst()).tag(seconds)
+                    }
+                }
+                .labelsHidden()
+                .fixedSize()
+                .help("Wie oft ein neues Bild vom Mac mini geholt wird (auch in den Einstellungen)")
                 Button {
                     forwarder.refreshScreenshot()
                 } label: {
@@ -55,7 +65,7 @@ struct ScreenMirrorView: View {
                     }
             }
 
-            Text("Klicken, Doppelklicken, Rechtsklick (zwei Finger), Ziehen und Scrollen im Bild wirken an derselben Stelle am Mac mini. Das Bild wird nach jedem Klick und alle 60 Sekunden aktualisiert. Tasten gehen weiterhin an den Mac mini.")
+            Text("Klicken, Doppelklicken, Rechtsklick (zwei Finger), Ziehen und Scrollen im Bild wirken an derselben Stelle am Mac mini. Das Bild wird nach jedem Klick aktualisiert und \(interval == 0 ? String(localized: "sonst nicht") : AppSettings.intervalLabel(interval)). Tasten gehen weiterhin an den Mac mini.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

@@ -184,6 +184,71 @@ public struct YouTube: Sendable {
         return result
     }
 
+    // MARK: - Suche
+
+    /// Suchergebnisse von youtube.com/results (ytInitialData): Videos, Shorts und Kanäle.
+    public func search(_ query: String) async throws -> YouTubeSearchResponse {
+        var components = URLComponents(string: "https://www.youtube.com/results")!
+        components.queryItems = [URLQueryItem(name: "search_query", value: query),
+                                 URLQueryItem(name: "hl", value: "de"), URLQueryItem(name: "gl", value: "DE")]
+        let html = try await fetch(components.url!)
+        guard let start = html.range(of: "var ytInitialData = "),
+              let end = html.range(of: ";</script>", range: start.upperBound..<html.endIndex),
+              let json = try? JSONSerialization.jsonObject(with: Data(html[start.upperBound..<end.lowerBound].utf8))
+        else { throw URLError(.cannotParseResponse) }
+
+        var videos: [YouTubeSearchResponse.Video] = []
+        var channels: [YouTubeSearchResponse.Channel] = []
+        var seen = Set<String>()
+        func value(_ root: Any?, _ keys: String...) -> Any? {
+            var current = root
+            for key in keys { current = (current as? [String: Any])?[key] }
+            return current
+        }
+        func text(_ root: Any?) -> String? {
+            if let simple = value(root, "simpleText") as? String { return simple }
+            let runs = (value(root, "runs") as? [[String: Any]])?.compactMap { $0["text"] as? String }
+            return runs.map { $0.joined() }
+        }
+        func walk(_ node: Any) {
+            if let dict = node as? [String: Any] {
+                if let r = dict["videoRenderer"] as? [String: Any], let id = r["videoId"] as? String,
+                   let title = text(r["title"]), seen.insert(id).inserted {
+                    let owner = (value(r, "ownerText", "runs") as? [[String: Any]])?.first
+                    videos.append(.init(
+                        id: id, title: title, channel: owner?["text"] as? String,
+                        channelID: value(owner, "navigationEndpoint", "browseEndpoint", "browseId") as? String,
+                        duration: text(r["lengthText"]), published: text(r["publishedTimeText"]),
+                        views: text(r["viewCountText"]),
+                        thumbnail: "https://i.ytimg.com/vi/\(id)/mqdefault.jpg", isShort: false))
+                } else if let s = dict["shortsLockupViewModel"] as? [String: Any],
+                          let id = value(s, "onTap", "innertubeCommand", "reelWatchEndpoint", "videoId") as? String,
+                          let title = value(s, "overlayMetadata", "primaryText", "content") as? String,
+                          seen.insert(id).inserted {
+                    videos.append(.init(
+                        id: id, title: title, channel: nil, channelID: nil, duration: nil, published: nil,
+                        views: value(s, "overlayMetadata", "secondaryText", "content") as? String,
+                        thumbnail: "https://i.ytimg.com/vi/\(id)/hqdefault.jpg", isShort: true))
+                } else if let c = dict["channelRenderer"] as? [String: Any], let id = c["channelId"] as? String,
+                          let name = text(c["title"]), seen.insert(id).inserted {
+                    let thumbs = value(c, "thumbnail", "thumbnails") as? [[String: Any]]
+                    let image = (thumbs?.last?["url"] as? String).map { $0.hasPrefix("//") ? "https:\($0)" : $0 }
+                    // YouTube zeigt in subscriberCountText den @Namen und in videoCountText die Abonnenten
+                    let handle = text(c["subscriberCountText"]).flatMap { $0.hasPrefix("@") ? $0 : nil }
+                    let subscribers = handle != nil ? text(c["videoCountText"]) : text(c["subscriberCountText"])
+                    channels.append(.init(id: id, name: name, handle: handle,
+                                          subscribers: subscribers?.replacingOccurrences(of: "\u{00A0}", with: " "),
+                                          image: image, added: false))
+                }
+                dict.values.forEach(walk)
+            } else if let array = node as? [Any] {
+                array.forEach(walk)
+            }
+        }
+        walk(json)
+        return YouTubeSearchResponse(query: query, videos: videos, channels: channels)
+    }
+
     // MARK: - Hilfen
 
     private func fetch(_ url: URL) async throws -> String {
@@ -199,11 +264,19 @@ public struct YouTube: Sendable {
     }
 
     public static func decodeEntities(_ text: String) -> String {
-        text.replacingOccurrences(of: "&amp;", with: "&")
-            .replacingOccurrences(of: "&quot;", with: "\"")
-            .replacingOccurrences(of: "&#39;", with: "'")
+        var result = text.replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&apos;", with: "'")
             .replacingOccurrences(of: "&lt;", with: "<")
             .replacingOccurrences(of: "&gt;", with: ">")
+        // Numerische Zeichen: &#39; &#x27; &#228; …
+        while let range = result.range(of: "&#[xX]?[0-9a-fA-F]+;", options: .regularExpression) {
+            var number = result[range].dropFirst(2).dropLast()
+            let hex = number.first == "x" || number.first == "X"
+            if hex { number = number.dropFirst() }
+            let scalar = UInt32(number, radix: hex ? 16 : 10).flatMap(Unicode.Scalar.init)
+            result.replaceSubrange(range, with: scalar.map { String(Character($0)) } ?? "")
+        }
+        return result.replacingOccurrences(of: "&amp;", with: "&")
     }
 }
 

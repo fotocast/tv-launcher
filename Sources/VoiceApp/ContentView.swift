@@ -19,14 +19,15 @@ struct ContentView: View {
     @State private var selection: SidebarItem? = .home
     @State private var search = ""
     @State private var showMovieBrowser = false
+    @State private var showYouTubeBrowser = false
     @AppStorage(AppSettings.showSortKey) private var showSortRaw = ShowSort.custom.rawValue
     @AppStorage(AppSettings.collapsedShowsKey) private var collapsedRaw = ""
 
     static func allLabel(_ kind: Show.Kind) -> String {
         switch kind {
-        case .youtube: return "Videos"
-        case .movies: return "Alle Filme"
-        default: return "Alle Links"
+        case .youtube: return String(localized: "Videos")
+        case .movies: return String(localized: "Alle Filme")
+        default: return String(localized: "Alle Links")
         }
     }
 
@@ -93,17 +94,37 @@ struct ContentView: View {
             ToolbarItem { sortMenu }
         }
         .safeAreaInset(edge: .bottom) {
+            // Sofort abspielen: Link einfügen oder YouTube / Joyn durchsuchen
             VStack(alignment: .leading, spacing: 8) {
-                Button {
-                    showMovieBrowser = true
-                } label: {
-                    Label("Joyn-Film suchen & starten …", systemImage: "film")
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                Text("Sofort abspielen")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                InstantPlayField(compact: true)
+                HStack(spacing: 8) {
+                    Button {
+                        showYouTubeBrowser = true
+                    } label: {
+                        Label("YouTube", systemImage: "play.rectangle.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .help("YouTube durchsuchen und Videos am Fernseher starten")
+                    Button {
+                        showMovieBrowser = true
+                    } label: {
+                        Label("Joyn", systemImage: "tv")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .help("Joyn durchsuchen: Filme starten, Serien hinzufügen")
                 }
+                .buttonStyle(.bordered)
             }
-            .buttonStyle(.borderless)
-            .padding(.horizontal, 14)
+            .padding(.horizontal, 12)
             .padding(.vertical, 10)
+            .background(.bar)
+        }
+        .sheet(isPresented: $showYouTubeBrowser) {
+            YouTubeBrowserSheet()
+                .environmentObject(model)
         }
         .sheet(isPresented: $showMovieBrowser) {
             JoynBrowserSheet { id in selection = .show(id) }
@@ -123,7 +144,7 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
             }
             ForEach(groups, id: \.self) { group in
-                Label(group, systemImage: group == Episode.shorts
+                Label(L(group), systemImage: group == Episode.shorts
                       ? "rectangle.portrait.on.rectangle.portrait" : "play.rectangle.on.rectangle")
                     .badge(model.episodes(for: show, group: group).count)
                     .tag(SidebarItem.group(show: show.id, group: group))
@@ -155,7 +176,7 @@ struct ContentView: View {
             withAnimation(.easeInOut(duration: 0.2)) { toggleCollapsed(show.id) }
         } label: {
             HStack(spacing: 6) {
-                Text(show.name)
+                Text(show.displayName)
                 Spacer(minLength: 4)
                 Image(systemName: "chevron.right")
                     .font(.caption.weight(.semibold))
@@ -240,7 +261,7 @@ struct ContentView: View {
         if model.shows.isEmpty, selection != .remote {
             PlaceholderView()
         } else if !search.trimmingCharacters(in: .whitespaces).isEmpty {
-            EpisodeListView(title: "Suche", episodes: searchResults, showContext: true)
+            EpisodeListView(title: String(localized: "Suche"), episodes: searchResults, showContext: true)
                 .playerBar()
         } else {
             switch selection ?? .home {
@@ -251,28 +272,35 @@ struct ContentView: View {
                 RemoteView()
             case .season(let showID, let season):
                 let show = model.show(showID)
-                EpisodeListView(title: "\(show?.name ?? "") – Staffel \(season)",
+                EpisodeListView(title: String(localized: "\(show?.displayName ?? "") – Staffel \(season)"),
                                 episodes: show.map { model.episodes(for: $0).filter { $0.season == season } } ?? [],
                                 showContext: false)
                     .playerBar()
             case .group(let showID, let group):
                 let show = model.show(showID)
-                ThumbnailGridView(title: "\(show?.name ?? "") – \(group)",
+                ThumbnailGridView(title: "\(show?.displayName ?? "") – \(L(group))",
                                   episodes: show.map { model.episodes(for: $0, group: group) } ?? [],
-                                  emptyText: "Keine \(group) gefunden",
+                                  emptyText: String(localized: "Keine \(L(group)) gefunden"),
                                   portrait: group == Episode.shorts)
                     .playerBar()
             case .show(let showID):
                 let show = model.show(showID)
                 let episodes = show.map { model.episodes(for: $0) } ?? []
-                if show?.kind == .youtube || show?.kind == .movies || showID == Show.youtubeVideosID {
-                    ThumbnailGridView(title: show?.name ?? "", episodes: episodes,
+                if showID == Show.youtubeVideosID {
+                    ThumbnailGridView(title: show?.displayName ?? "", episodes: episodes,
+                                      emptyText: String(localized: "Noch keine Videos – links unten einen Link einfügen oder „YouTube“ öffnen."))
+                        .toolbar {
+                            ToolbarItem { ClearYouTubeHistoryButton().disabled(episodes.isEmpty) }
+                        }
+                        .playerBar()
+                } else if show?.kind == .youtube || show?.kind == .movies {
+                    ThumbnailGridView(title: show?.displayName ?? "", episodes: episodes,
                                       emptyText: show?.kind == .movies
-                                          ? "Noch keine Filme – links unten „Joyn-Film suchen & starten …“."
+                                          ? "Noch keine Filme – links unten „Joyn“ öffnen oder einen Filmlink einfügen."
                                           : (model.isLoading ? "Lädt …" : "Keine Videos gefunden"))
                         .playerBar()
                 } else {
-                    EpisodeListView(title: show?.name ?? "", episodes: episodes, showContext: false)
+                    EpisodeListView(title: show?.displayName ?? "", episodes: episodes, showContext: false)
                         .playerBar()
                 }
             }
@@ -306,6 +334,14 @@ struct HomeView: View {
     /// Wechselt in der Seitenleiste zu einem Eintrag
     var open: (SidebarItem) -> Void
     @AppStorage(AppSettings.showSortKey) private var showSortRaw = ShowSort.custom.rawValue
+    @AppStorage(AppSettings.homeHiddenKey) private var hiddenRaw = ""
+    @AppStorage(AppSettings.tileSizeKey) private var tileSizeRaw = TileSize.medium.rawValue
+
+    private var hidden: Set<HomeSection> { HomeSection.hidden(hiddenRaw) }
+    private func isVisible(_ section: HomeSection) -> Bool { !hidden.contains(section) }
+    private var columns: [GridItem] {
+        [GridItem(.adaptive(minimum: (TileSize(rawValue: tileSizeRaw) ?? .medium).minimumWidth), spacing: 18)]
+    }
 
     private var shows: [Show] { model.sortedShows(ShowSort(rawValue: showSortRaw) ?? .custom) }
     private var series: [Show] { shows.filter { $0.kind == .joyn } }
@@ -332,20 +368,22 @@ struct HomeView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 28) {
-                if let last = model.lastPlayed {
-                    hero(last)
-                } else {
-                    Text("Klicke auf eine Folge, einen Film oder ein Video – es startet am Fernseher.")
-                        .font(.title3)
-                        .foregroundStyle(.secondary)
+                if isVisible(.continueWatching) {
+                    if let last = model.lastPlayed {
+                        hero(last)
+                    } else {
+                        Text("Klicke auf eine Folge, einen Film oder ein Video – es startet am Fernseher.")
+                            .font(.title3)
+                            .foregroundStyle(.secondary)
+                    }
                 }
-                if let show = featuredShow, !newest.isEmpty {
+                if isVisible(.newest), let show = featuredShow, !newest.isEmpty {
                     VStack(alignment: .leading, spacing: 12) {
                         Text(show.kind == .joyn
-                             ? "Neu in \(show.name) – Staffel \(model.seasons(for: show).first ?? 0)"
-                             : show.kind == .youtube ? "Neu auf \(show.name)" : show.name)
+                             ? String(localized: "Neu in \(show.displayName) – Staffel \(model.seasons(for: show).first ?? 0)")
+                             : show.kind == .youtube ? String(localized: "Neu auf \(show.displayName)") : show.displayName)
                             .font(.title2.weight(.semibold))
-                        LazyVGrid(columns: Self.columns, spacing: 18) {
+                        LazyVGrid(columns: columns, spacing: 18) {
                             ForEach(newest, id: \.key) { episode in
                                 if episode.thumbnail != nil {
                                     ThumbnailCard(episode: episode)
@@ -365,28 +403,27 @@ struct HomeView: View {
         .navigationTitle("Startseite")
     }
 
-    static let columns = [GridItem(.adaptive(minimum: 230), spacing: 18)]
 
     // MARK: Mediathek
 
     @ViewBuilder
     private var librarySections: some View {
-        if !series.isEmpty {
+        if isVisible(.series), !series.isEmpty {
             section("Serien") {
                 ForEach(series) { show in
                     let season = model.seasons(for: show).first
-                    ShowCard(title: show.name, subtitle: seriesInfo(show), image: show.image,
+                    ShowCard(title: show.displayName, subtitle: seriesInfo(show), image: show.image,
                              icon: "play.tv.fill", isRecent: isRecent(show)) {
                         open(season.map { .season(show: show.id, season: $0) } ?? .show(show.id))
                     }
                 }
             }
         }
-        if !channels.isEmpty {
+        if isVisible(.channels), !channels.isEmpty {
             section("YouTube-Kanäle") {
                 ForEach(channels) { show in
                     let latest = model.episodes(for: show, group: Episode.videos).first ?? model.episodes(for: show).first
-                    ShowCard(title: show.name, subtitle: channelInfo(show), image: latest?.thumbnail,
+                    ShowCard(title: show.displayName, subtitle: channelInfo(show), image: latest?.thumbnail,
                              icon: "play.rectangle.fill", avatar: show.image, isRecent: isRecent(show)) {
                         let groups = model.groups(for: show)
                         open(groups.first.map { .group(show: show.id, group: $0) } ?? .show(show.id))
@@ -394,22 +431,23 @@ struct HomeView: View {
                 }
             }
         }
-        if !movies.isEmpty {
+        if isVisible(.movies), !movies.isEmpty {
             section("Filme", count: movies.count, showAll: { open(.show(Show.moviesID)) }) {
                 ForEach(movies.prefix(8), id: \.key) { ThumbnailCard(episode: $0) }
             }
         }
-        if !videos.isEmpty {
+        if isVisible(.videos), !videos.isEmpty {
             section("Zuletzt gestartete YouTube-Videos", count: videos.count,
-                    showAll: { open(.show(Show.youtubeVideosID)) }) {
+                    showAll: { open(.show(Show.youtubeVideosID)) },
+                    accessory: AnyView(ClearYouTubeHistoryButton().buttonStyle(.link))) {
                 ForEach(videos.prefix(8), id: \.key) { ThumbnailCard(episode: $0) }
             }
         }
-        if !customShows.isEmpty {
+        if isVisible(.custom), !customShows.isEmpty {
             section("Eigene Shows") {
                 ForEach(customShows) { show in
                     let count = model.episodes(for: show).count
-                    ShowCard(title: show.name, subtitle: count == 1 ? "1 Link" : "\(count) Links", image: nil,
+                    ShowCard(title: show.displayName, subtitle: count == 1 ? String(localized: "1 Link") : String(localized: "\(count) Links"), image: nil,
                              icon: "link", isRecent: isRecent(show)) {
                         open(.show(show.id))
                     }
@@ -419,18 +457,20 @@ struct HomeView: View {
     }
 
     private func section<Content: View>(_ title: String, count: Int = 0, showAll: (() -> Void)? = nil,
+                                        accessory: AnyView? = nil,
                                         @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline) {
-                Text(title)
+                Text(LocalizedStringKey(title))
                     .font(.title2.weight(.semibold))
                 Spacer()
+                if let accessory { accessory }
                 if let showAll, count > 8 {
                     Button("Alle \(count) anzeigen", action: showAll)
                         .buttonStyle(.link)
                 }
             }
-            LazyVGrid(columns: Self.columns, spacing: 22) {
+            LazyVGrid(columns: columns, spacing: 22) {
                 content()
             }
         }
@@ -440,16 +480,19 @@ struct HomeView: View {
 
     private func seriesInfo(_ show: Show) -> String {
         let seasons = model.seasons(for: show)
-        guard let newest = seasons.first else { return model.isLoading ? "Lädt …" : "Joyn-Serie" }
+        guard let newest = seasons.first else {
+            return model.isLoading ? String(localized: "Lädt …") : String(localized: "Joyn-Serie")
+        }
         let count = model.episodes(for: show).filter { $0.season == newest }.count
-        return "Staffel \(newest) · \(count) Folgen" + (seasons.count > 1 ? " · \(seasons.count) Staffeln" : "")
+        return String(localized: "Staffel \(newest) · \(count) Folgen")
+            + (seasons.count > 1 ? String(localized: " · \(seasons.count) Staffeln") : "")
     }
 
     private func channelInfo(_ show: Show) -> String {
         let videos = model.episodes(for: show, group: Episode.videos).count
         let shorts = model.episodes(for: show, group: Episode.shorts).count
-        if videos + shorts == 0 { return model.isLoading ? "Lädt …" : "YouTube-Kanal" }
-        return shorts > 0 ? "\(videos) Videos · \(shorts) Shorts" : "\(videos) Videos"
+        if videos + shorts == 0 { return model.isLoading ? String(localized: "Lädt …") : String(localized: "YouTube-Kanal") }
+        return shorts > 0 ? String(localized: "\(videos) Videos · \(shorts) Shorts") : String(localized: "\(videos) Videos")
     }
 
     private func hero(_ episode: Episode) -> some View {
@@ -461,7 +504,7 @@ struct HomeView: View {
                 .font(.system(size: 34, weight: .bold))
                 .foregroundStyle(.white)
             if !episode.subtitle.isEmpty {
-                Text(episode.subtitle)
+                Text(L(episode.subtitle))
                     .font(.title3)
                     .foregroundStyle(.white.opacity(0.85))
                     .lineLimit(2)
@@ -515,9 +558,10 @@ struct HomeView: View {
     }
 
     private func caption(for episode: Episode) -> String {
-        let show = model.show(episode.show)?.name.uppercased() ?? ""
-        let position = episode.season > 0 ? "STAFFEL \(episode.season), FOLGE \(episode.number)" : "NR. \(episode.number)"
-        return "ZULETZT GESEHEN · \(show) · \(position)"
+        let show = model.show(episode.show)?.displayName.uppercased() ?? ""
+        let position = episode.season > 0 ? String(localized: "STAFFEL \(episode.season), FOLGE \(episode.number)")
+            : String(localized: "NR. \(episode.number)")
+        return String(localized: "ZULETZT GESEHEN · \(show) · \(position)")
     }
 }
 
@@ -548,7 +592,7 @@ struct EpisodeCard: View {
                 }
                 Text(episode.title)
                     .font(.headline)
-                Text(episode.subtitle)
+                Text(L(episode.subtitle))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .lineLimit(2, reservesSpace: true)
@@ -606,7 +650,7 @@ struct EpisodeRow: View {
     private var isLast: Bool { model.isLastPlayed(episode) }
 
     private var context: String {
-        let show = model.show(episode.show)?.name ?? ""
+        let show = model.show(episode.show)?.displayName ?? ""
         return episode.season > 0 ? "\(show) · S\(episode.season)" : show
     }
 
@@ -644,7 +688,7 @@ struct EpisodeRow: View {
                         }
                     }
                     if !episode.subtitle.isEmpty {
-                        Text(episode.subtitle)
+                        Text(L(episode.subtitle))
                             .font(.body)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)

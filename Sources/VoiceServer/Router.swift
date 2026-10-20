@@ -1,4 +1,6 @@
 import Foundation
+import ApplicationServices
+import CoreGraphics
 import VoiceCore
 
 /// Hält für jede Joyn-Serie einen eigenen Katalog (mit eigenem Cache).
@@ -28,6 +30,8 @@ final class Router: @unchecked Sendable {
     private let autoPlay = AutoPlay()
     private let remoteInput = RemoteInput()
     private let youtube = YouTube()
+    private let sleepTimer = SleepTimer()
+    private let startedAt = Date()
     /// Nach dieser Zeit wird eine Joyn-Liste beim nächsten Abruf neu von joyn.de geladen.
     private let refreshInterval: TimeInterval = 3 * 3600
 
@@ -38,6 +42,11 @@ final class Router: @unchecked Sendable {
     }
 
     func handle(_ request: HTTPRequest) async -> HTTPResponse {
+        let response = await route(request)
+        return ServerI18n.wantsEnglish(request) ? ServerI18n.translate(response) : response
+    }
+
+    private func route(_ request: HTTPRequest) async -> HTTPResponse {
         switch (request.method, request.path) {
         case ("OPTIONS", _):
             return HTTPResponse(status: 204, contentType: "text/plain", body: Data())
@@ -47,6 +56,58 @@ final class Router: @unchecked Sendable {
             return .json(await state.showsResponse)
         case ("POST", "/api/shows"):
             return await saveShow(request)
+        case ("GET", "/api/settings"):
+            return .json(await state.settings)
+        case ("POST", "/api/settings"):
+            return await saveSettings(request)
+        case ("GET", "/api/status"):
+            return .json(await status())
+        case ("GET", "/api/log"):
+            return log(lines: Int(request.queryValue("lines") ?? "") ?? 300)
+        case ("POST", "/api/restart"):
+            serverLog("Neustart angefordert – der Dienst startet gleich neu.")
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) { exit(0) }   // launchd startet neu (KeepAlive)
+            return .json(PlayResponse(ok: true, message: "Server startet neu …"))
+        case ("GET", "/api/volume"):
+            return .json(Player.volume() ?? VolumeResponse(volume: nil, muted: nil))
+        case ("POST", "/api/volume"):
+            return await volume(request)
+        case ("POST", "/api/sleep"):
+            return await sleep(request)
+        case ("GET", "/api/backup"):
+            var response = HTTPResponse.json(await state.backup)
+            let day = ISO8601DateFormatter.string(from: Date(), timeZone: .current, formatOptions: [.withFullDate])
+            response.headers["Content-Disposition"] = "attachment; filename=\"TV-Launcher-Sicherung-\(day).json\""
+            return response
+        case ("POST", "/api/restore"):
+            return await restore(request)
+        case ("GET", "/api/presets"):
+            return .json(await state.presetsResponse)
+        case ("POST", "/api/presets"):
+            guard var preset = try? JSONCoding.decoder.decode(PresetRequest.self, from: request.body).preset else {
+                return .error("Erwartet wird {\"preset\": {\"name\", \"controls\"}}", status: 400)
+            }
+            preset.name = preset.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !preset.name.isEmpty else { return .error("Das Preset braucht einen Namen.", status: 400) }
+            if KeyPreset.builtIns.contains(where: {
+                $0.id == preset.id || $0.name.localizedCaseInsensitiveCompare(preset.name) == .orderedSame
+            }) {
+                return .error("„\(preset.name)“ ist eine eingebaute Vorlage – bitte einen anderen Namen wählen.", status: 400)
+            }
+            if preset.id.isEmpty || preset.id.hasPrefix("builtin-") {
+                preset.id = "preset-" + UUID().uuidString.lowercased().prefix(8)
+            }
+            await state.savePreset(preset)
+            serverLog("Tasten-Preset gesichert: \(preset.name)")
+            return .json(await state.presetsResponse)
+        case ("POST", "/api/presets/delete"):
+            guard let body = try? JSONCoding.decoder.decode(DeleteShowRequest.self, from: request.body) else {
+                return .error("Erwartet wird {\"id\": \"<Preset>\"}", status: 400)
+            }
+            await state.deletePreset(body.id)
+            return .json(await state.presetsResponse)
+        case ("POST", "/api/shows/add"):
+            return await addShow(request)
         case ("POST", "/api/shows/delete"):
             return await deleteShow(request)
         case ("POST", "/api/shows/order"):
@@ -63,6 +124,17 @@ final class Router: @unchecked Sendable {
             return await play(request)
         case ("POST", "/api/movies"):
             return await movie(request)
+        case ("GET", "/api/youtube/search"):
+            return await youtubeSearch(request.queryValue("q") ?? "")
+        case ("POST", "/api/youtube/clear"):
+            // Verlauf der einzeln gestarteten YouTube-Videos löschen
+            if var collection = await state.show(Show.youtubeVideosID) {
+                collection.links = []
+                await state.upsert(collection)
+            }
+            await state.forgetPlayed(show: Show.youtubeVideosID)
+            serverLog("YouTube-Verlauf gelöscht")
+            return .json(await state.showsResponse)
         case ("POST", "/api/youtube"):
             return await youtubeVideo(request)
         case ("POST", "/api/control"):
@@ -85,9 +157,50 @@ final class Router: @unchecked Sendable {
     // MARK: - Shows
 
     private func saveShow(_ request: HTTPRequest) async -> HTTPResponse {
-        guard var show = try? JSONCoding.decoder.decode(ShowRequest.self, from: request.body).show else {
+        guard let show = try? JSONCoding.decoder.decode(ShowRequest.self, from: request.body).show else {
             return .error("Erwartet wird {\"show\": {...}}", status: 400)
         }
+        return await save(show)
+    }
+
+    /// Neue Show aus einer Adresse (Web-App)
+    private func addShow(_ request: HTTPRequest) async -> HTTPResponse {
+        guard let body = try? JSONCoding.decoder.decode(AddShowRequest.self, from: request.body) else {
+            return .error("Erwartet wird {\"kind\", \"input\", \"name\"}", status: 400)
+        }
+        let input = (body.input ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = (body.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        switch body.kind {
+        case .joyn:
+            let url = URL(string: input.contains("://") ? input : "https://www.joyn.de/serien/\(input)")
+            guard let slug = url.flatMap(Show.joynSeries(in:)) else {
+                return .error("Keine Joyn-Serie erkannt. Erwartet wird eine Adresse wie joyn.de/serien/…", status: 400)
+            }
+            if let existing = await state.show(slug) {
+                return .error("„\(existing.name)“ ist schon vorhanden.", status: 400)
+            }
+            guard let info = await Self.joynSeriesInfo(slug) else {
+                return .error("Die Serie „\(slug)“ wurde auf joyn.de nicht gefunden.", status: 400)
+            }
+            var show = Show.joyn(series: slug, name: name.isEmpty ? info.name ?? Self.humanized(slug) : name)
+            show.image = info.image
+            return await save(show)
+        case .youtube:
+            guard !input.isEmpty else { return .error("Bitte eine Kanal-Adresse oder @Name eingeben.", status: 400) }
+            return await save(Show.youtube(channel: input, name: name))
+        case .custom:
+            return await save(Show.custom(name: name.isEmpty ? "Neue Show" : name))
+        case .movies:
+            return .error("Filme bitte über /api/movies hinzufügen.", status: 400)
+        }
+    }
+
+    private static func humanized(_ slug: String) -> String {
+        slug.split(separator: "-").map { $0.prefix(1).uppercased() + $0.dropFirst() }.joined(separator: " ")
+    }
+
+    private func save(_ show: Show) async -> HTTPResponse {
+        var show = show
         show.name = show.name.trimmingCharacters(in: .whitespacesAndNewlines)
         if show.kind == .youtube {
             // Kanal-Adresse oder @Name in die Kanal-ID umwandeln, Name und Bild übernehmen
@@ -160,17 +273,18 @@ final class Router: @unchecked Sendable {
         case .joyn: break
         }
 
+        let settings = await state.settings
         let stored = await state.catalog(for: show.id)
         let isEmpty = stored?.episodes.isEmpty ?? true
         let isStale = stored?.updatedAt.map { Date().timeIntervalSince($0) > refreshInterval } ?? true
         if force || isStale || isEmpty {
             let catalog = await catalogs.catalog(for: show.id)
             do {
-                await state.setEpisodes(try await catalog.refresh(), for: show.id)
+                await state.setEpisodes(try await catalog.refresh(seasonCount: settings.joynSeasons), for: show.id)
             } catch {
                 serverLog("\(show.id): Aktualisierung fehlgeschlagen: \(error.localizedDescription)")
                 if isEmpty {
-                    let cached = await catalog.cachedSelection()
+                    let cached = await catalog.cachedSelection(seasonCount: settings.joynSeasons)
                     if cached.isEmpty {
                         return .error("Folgen konnten nicht von joyn.de geladen werden: \(error.localizedDescription)",
                                       status: 502)
@@ -182,12 +296,13 @@ final class Router: @unchecked Sendable {
         return .json(await state.response(for: show))
     }
 
-    /// YouTube: die neuesten Videos, alle 30 Minuten neu geladen
+    /// YouTube: die neuesten Videos, neu geladen im eingestellten Abstand (Standard 30 Minuten)
     private func youtubeEpisodes(_ show: Show, force: Bool) async -> HTTPResponse {
         guard let channel = show.channel else { return .error("Kanal fehlt", status: 500) }
         let stored = await state.catalog(for: show.id)
         let isEmpty = stored?.episodes.isEmpty ?? true
-        let isStale = stored?.updatedAt.map { Date().timeIntervalSince($0) > 30 * 60 } ?? true
+        let interval = Double(await state.settings.youtubeRefreshMinutes) * 60
+        let isStale = stored?.updatedAt.map { Date().timeIntervalSince($0) > interval } ?? true
         if force || isStale || isEmpty {
             do {
                 let videos = try await youtube.videos(channelID: channel, show: show.id)
@@ -221,13 +336,22 @@ final class Router: @unchecked Sendable {
     private func start(_ episode: Episode, of show: Show) async -> HTTPResponse {
         guard let url = episode.playURL else { return .error("Ungültige Adresse", status: 400) }
         do {
-            try Player.open(url, browser: config.browser)
+            await autoPlay.cancel()
+            try Player.open(url, browser: config.browser, closeOldTabs: config.closeOldTabs)
             await state.setLastPlayed(EpisodeRef(show: show.id, id: episode.id))
             serverLog("Spiele \(show.name): \(episode.code) \(episode.title)")
-            let start = show.controls.start
-            if start.kind != .none {
-                let (autoPlay, delay, browser) = (self.autoPlay, show.controls.startDelay, config.browser)
-                Task { await autoPlay.press(start, after: delay, browser: browser) }
+            let settings = await state.settings
+            if let volume = settings.startVolume { Player.setVolume(volume) }
+            // Start-Taste nach der Wartezeit, danach auf Wunsch Vollbild
+            var steps: [(KeyBinding, Double)] = [(show.controls.start, show.controls.startDelay)]
+            if settings.autoFullscreen, show.controls.fullscreen.kind != .none {
+                let wait = show.controls.start.kind == .none
+                    ? show.controls.startDelay + settings.fullscreenDelay : settings.fullscreenDelay
+                steps.append((show.controls.fullscreen, wait))
+            }
+            if steps.contains(where: { $0.0.kind != .none }) {
+                let (autoPlay, browser) = (self.autoPlay, config.browser)
+                Task { await autoPlay.sequence(steps, browser: browser) }
             } else {
                 await autoPlay.cancel()
             }
@@ -319,13 +443,29 @@ final class Router: @unchecked Sendable {
 
     /// Titelbild einer Joyn-Serie (og:image der Serienseite, Querformat)
     static func joynSeriesImage(_ slug: String) async -> String? {
+        await joynSeriesInfo(slug)?.image
+    }
+
+    /// Name und Titelbild einer Joyn-Serie von ihrer Seite.
+    /// og:title lautet z. B. 'Ganze Folgen von "Germany's Next Topmodel" kostenlos online streamen | Joyn'.
+    /// `nil`, wenn es die Serienseite nicht gibt.
+    static func joynSeriesInfo(_ slug: String) async -> (name: String?, image: String?)? {
         guard let url = URL(string: "https://www.joyn.de/serien/\(slug)") else { return nil }
         var request = URLRequest(url: url, timeoutInterval: 20)
         request.setValue(JoynCatalog.userAgent, forHTTPHeaderField: "User-Agent")
         guard let (data, response) = try? await URLSession.shared.data(for: request),
               (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
-        return JoynCatalog.matches(of: #"<meta property="og:image" content="([^"]*)""#,
-                                   in: String(decoding: data, as: UTF8.self)).first.map(YouTube.decodeEntities)
+        let html = String(decoding: data, as: UTF8.self)
+        let image = JoynCatalog.matches(of: #"<meta property="og:image" content="([^"]*)""#, in: html).first
+            .map(YouTube.decodeEntities)
+        let title = JoynCatalog.matches(of: #"<meta property="og:title" content="([^"]*)""#, in: html).first
+            .map(YouTube.decodeEntities)
+        var name: String?
+        if let title, let start = title.firstIndex(of: "\""),
+           let end = title[title.index(after: start)...].firstIndex(of: "\"") {
+            name = String(title[title.index(after: start)..<end])
+        }
+        return (name?.isEmpty == false ? name : nil, image)
     }
 
     /// Ältere Joyn-Shows ohne Titelbild nachträglich ergänzen
@@ -353,6 +493,130 @@ final class Router: @unchecked Sendable {
             .map(YouTube.decodeEntities)
         let fallback = slug.split(separator: "-").map { $0.prefix(1).uppercased() + $0.dropFirst() }.joined(separator: " ")
         return (title ?? fallback, image)
+    }
+
+    /// YouTube durchsuchen (Web-App); Kanäle, die schon Shows sind, werden markiert
+    private func youtubeSearch(_ query: String) async -> HTTPResponse {
+        let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return .error("Suchbegriff fehlt", status: 400) }
+        do {
+            var result = try await youtube.search(query)
+            let added = Set(await state.showsResponse.shows.compactMap { $0.kind == .youtube ? $0.channel : nil })
+            for index in result.channels.indices { result.channels[index].added = added.contains(result.channels[index].id) }
+            return .json(result)
+        } catch {
+            return .error("YouTube-Suche fehlgeschlagen: \(error.localizedDescription)", status: 502)
+        }
+    }
+
+    // MARK: - Einstellungen, Status & Wartung
+
+    private func saveSettings(_ request: HTTPRequest) async -> HTTPResponse {
+        guard let body = try? JSONCoding.decoder.decode(SettingsRequest.self, from: request.body) else {
+            return .error("Erwartet wird {\"settings\": {...}}", status: 400)
+        }
+        let old = await state.settings
+        await state.setSettings(body.settings)
+        let new = await state.settings
+        serverLog("Einstellungen gesichert")
+        // Andere Staffelzahl: Joyn-Serien im Hintergrund neu laden
+        if new.joynSeasons != old.joynSeasons {
+            Task {
+                for show in await state.showsResponse.shows where show.kind == .joyn {
+                    _ = await episodes(showID: show.id, force: true)
+                }
+            }
+        }
+        return .json(new)
+    }
+
+    private func status() async -> ServerStatus {
+        let volume = Player.volume()
+        return ServerStatus(version: TVLauncher.version, host: ProcessInfo.processInfo.hostName,
+                            browser: config.browser, closeOldTabs: config.closeOldTabs,
+                            accessibility: AXIsProcessTrusted(), screenRecording: CGPreflightScreenCaptureAccess(),
+                            startedAt: startedAt, volume: volume?.volume, muted: volume?.muted,
+                            sleepAt: await sleepTimer.endsAt)
+    }
+
+    /// Die letzten Zeilen des Server-Logs
+    private func log(lines: Int) -> HTTPResponse {
+        let file = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/TheVoiceServer.log")
+        guard let text = try? String(contentsOf: file, encoding: .utf8) else {
+            return .error("Log nicht gefunden: \(file.path)", status: 404)
+        }
+        let tail = text.split(separator: "\n", omittingEmptySubsequences: false).suffix(min(max(lines, 10), 2000))
+        return HTTPResponse(status: 200, contentType: "text/plain; charset=utf-8", body: Data(tail.joined(separator: "\n").utf8))
+    }
+
+    private func volume(_ request: HTTPRequest) async -> HTTPResponse {
+        guard let body = try? JSONCoding.decoder.decode(VolumeRequest.self, from: request.body) else {
+            return .error("Erwartet wird {\"action\": \"up|down|mute|set\", \"value\": 0…100}", status: 400)
+        }
+        guard let current = Player.volume(), let level = current.volume, let muted = current.muted else {
+            // Ton über HDMI: macOS kann nicht regeln → Lautstärke-Tasten des Players der laufenden Show
+            let showID = await state.lastPlayed?.show ?? Episode.series
+            let show = await state.show(showID) ?? Show.theVoice
+            let binding: KeyBinding
+            switch body.action {
+            case "up": binding = show.controls.volumeUp
+            case "down": binding = show.controls.volumeDown
+            case "mute": binding = show.controls.mute
+            default: binding = .none
+            }
+            guard binding.kind != .none else {
+                return .error("Der Ton läuft über HDMI – die Lautstärke lässt sich am Mac nicht regeln, und \(show.name) hat "
+                              + "keine Lautstärke-Taste. Bitte die Fernbedienung des Fernsehers nutzen.", status: 400)
+            }
+            do {
+                try Player.perform(binding, browser: config.browser)
+            } catch {
+                return .error(error.localizedDescription, status: 500)
+            }
+            return .json(VolumeResponse(volume: nil, muted: nil, message: "Lautstärke im Player (\(binding.label))"))
+        }
+        Player.wakeDisplay()
+        switch body.action {
+        case "up": Player.setVolume(level + 6)
+        case "down": Player.setVolume(level - 6)
+        case "mute": Player.setMuted(!muted)
+        case "set": Player.setVolume(body.value ?? level)
+        default: return .error("Unbekannte Aktion „\(body.action)“", status: 400)
+        }
+        guard let now = Player.volume() else { return .error("Lautstärke nicht lesbar", status: 500) }
+        return .json(now)
+    }
+
+    private func sleep(_ request: HTTPRequest) async -> HTTPResponse {
+        guard let body = try? JSONCoding.decoder.decode(SleepRequest.self, from: request.body) else {
+            return .error("Erwartet wird {\"minutes\": 30}", status: 400)
+        }
+        let (state, browser) = (self.state, config.browser)
+        await sleepTimer.start(minutes: body.minutes) {
+            serverLog("Sleep-Timer abgelaufen: Pause und Display aus")
+            if let last = await state.lastPlayed, let show = await state.show(last.show) {
+                try? Player.perform(show.controls.playPause, browser: browser)
+            }
+            Player.displaySleep()
+        }
+        serverLog(body.minutes > 0 ? "Sleep-Timer: \(body.minutes) Min." : "Sleep-Timer aus")
+        return .json(await status())
+    }
+
+    private func restore(_ request: HTTPRequest) async -> HTTPResponse {
+        guard let backup = try? JSONCoding.decoder.decode(BackupFile.self, from: request.body),
+              backup.app == "TV Launcher" else {
+            return .error("Keine gültige TV-Launcher-Sicherung", status: 400)
+        }
+        await state.restore(backup)
+        serverLog("Sicherung eingespielt: \(backup.shows.count) Shows, \(backup.presets.count) Presets")
+        // Folgen der Shows im Hintergrund laden
+        Task {
+            for show in await state.showsResponse.shows where show.kind != .custom {
+                _ = await episodes(showID: show.id, force: false)
+            }
+        }
+        return .json(await state.showsResponse)
     }
 
     private func control(_ request: HTTPRequest) async -> HTTPResponse {

@@ -1,4 +1,10 @@
 #!/bin/bash
+# Runs as root after the app is installed.
 # Remove the old version that used the previous name
 rm -rf "/Applications/The Voice.app"
+# Open the app for the logged-in user
+USER_NAME="$(stat -f%Su /dev/console)"
+if [ -n "$USER_NAME" ] && [ "$USER_NAME" != "root" ] && [ "$USER_NAME" != "loginwindow" ]; then
+  launchctl asuser "$(id -u "$USER_NAME")" sudo -u "$USER_NAME" open "/Applications/TV Launcher.app" || true
+fi
 exit 0

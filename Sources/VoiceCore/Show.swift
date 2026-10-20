@@ -199,6 +199,10 @@ public struct KeyBinding: Codable, Hashable, Sendable {
     }
 
     public static let space = key(49, "Leertaste")
+    /// YouTube: Untertitel an/aus
+    public static let c = key(8, "C")
+    /// Browser-Tab schließen (⌘W) – gilt für jede Show
+    public static let closeTab = key(13, "⌘W", modifiers: 1 << 20)
     public static let left = key(123, "←")
     public static let right = key(124, "→")
 }
@@ -213,25 +217,53 @@ public struct ShowControls: Codable, Hashable, Sendable {
     public var start: KeyBinding
     /// Sekunden bis `start` gedrückt wird
     public var startDelay: Double
+    /// Untertitel an/aus (fehlt in älteren Daten → keine Taste)
+    public var subtitles: KeyBinding
+    /// Lautstärke im Player – nur nötig, wenn der Mac die Lautstärke nicht selbst regeln kann (Ton über HDMI)
+    public var volumeUp: KeyBinding
+    public var volumeDown: KeyBinding
+    public var mute: KeyBinding
 
     public init(playPause: KeyBinding, back: KeyBinding, forward: KeyBinding, fullscreen: KeyBinding,
-                start: KeyBinding, startDelay: Double) {
+                start: KeyBinding, startDelay: Double, subtitles: KeyBinding = .none,
+                volumeUp: KeyBinding = .none, volumeDown: KeyBinding = .none, mute: KeyBinding = .none) {
         self.playPause = playPause
         self.back = back
         self.forward = forward
         self.fullscreen = fullscreen
         self.start = start
         self.startDelay = startDelay
+        self.subtitles = subtitles
+        self.volumeUp = volumeUp
+        self.volumeDown = volumeDown
+        self.mute = mute
     }
 
-    /// Joyn-Player: Leertaste, Pfeiltasten, Vollbild per Doppelklick, Start per Leertaste
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        playPause = try c.decode(KeyBinding.self, forKey: .playPause)
+        back = try c.decode(KeyBinding.self, forKey: .back)
+        forward = try c.decode(KeyBinding.self, forKey: .forward)
+        fullscreen = try c.decode(KeyBinding.self, forKey: .fullscreen)
+        start = try c.decode(KeyBinding.self, forKey: .start)
+        startDelay = try c.decode(Double.self, forKey: .startDelay)
+        subtitles = try c.decodeIfPresent(KeyBinding.self, forKey: .subtitles) ?? .none
+        volumeUp = try c.decodeIfPresent(KeyBinding.self, forKey: .volumeUp) ?? .none
+        volumeDown = try c.decodeIfPresent(KeyBinding.self, forKey: .volumeDown) ?? .none
+        mute = try c.decodeIfPresent(KeyBinding.self, forKey: .mute) ?? .none
+    }
+
+    /// Joyn-Player: Leertaste, Pfeiltasten, Vollbild per Doppelklick, Start per Leertaste.
+    /// Untertitel lassen sich bei Joyn nicht per Taste schalten (nur im Player-Menü).
     public static let joynDefault = ShowControls(playPause: .space, back: .left, forward: .right,
                                                  fullscreen: .doubleClick, start: .space, startDelay: 10)
-    /// YouTube: K = Pause/Weiter, J/L = 10 s zurück/vor, F = Vollbild; K nach 5 s startet das Video,
-    /// weil Firefox automatisches Abspielen mit Ton blockiert
+    /// YouTube: K = Pause/Weiter, J/L = 10 s zurück/vor, F = Vollbild, C = Untertitel, ↑/↓/M = Lautstärke; K nach 5 s startet
+    /// das Video, weil Firefox automatisches Abspielen mit Ton blockiert
     public static let youtubeDefault = ShowControls(playPause: .key(40, "K"), back: .key(38, "J"),
                                                     forward: .key(37, "L"), fullscreen: .key(3, "F"),
-                                                    start: .key(40, "K"), startDelay: 5)
+                                                    start: .key(40, "K"), startDelay: 5, subtitles: .c,
+                                                    volumeUp: .key(126, "↑"), volumeDown: .key(125, "↓"),
+                                                    mute: .key(46, "M"))
     /// Eigene Shows: Leertaste, Pfeiltasten, F für Vollbild, nichts beim Start
     public static let customDefault = ShowControls(playPause: .space, back: .left, forward: .right,
                                                    fullscreen: .key(3, "F"), start: .none, startDelay: 5)
@@ -242,6 +274,8 @@ public struct ShowControls: Codable, Hashable, Sendable {
         case .back: return back
         case .forward: return forward
         case .fullscreen: return fullscreen
+        case .subtitles: return subtitles
+        case .closeTab: return .closeTab
         }
     }
 }

@@ -18,11 +18,15 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/VoiceApp"
 cp Resources/AppInfo.plist "$APP/Contents/Info.plist"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+cp -R Resources/*.lproj "$APP/Contents/Resources/"
 codesign --force --deep -s - "$APP"
 
 if [ -w /Applications ]; then
   # Alte Version unter dem früheren Namen "The Voice" entfernen
+  # Laufende App beenden, sonst öffnet "open" weiter die alte Version
+  osascript -e 'quit app "TV Launcher"' >/dev/null 2>&1 || true
   osascript -e 'quit app "The Voice"' >/dev/null 2>&1 || true
+  sleep 1
   rm -rf "/Applications/The Voice.app" "/Applications/TV Launcher.app"
   cp -R "$APP" /Applications/
   echo "==> Fertig: /Applications/TV Launcher.app"

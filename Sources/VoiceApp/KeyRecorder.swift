@@ -21,9 +21,9 @@ struct KeyBindingRow: View {
     }
 
     var body: some View {
-        LabeledContent(title) {
+        LabeledContent(LocalizedStringKey(title)) {
             HStack(spacing: 8) {
-                Picker(title, selection: kind) {
+                Picker(LocalizedStringKey(title), selection: kind) {
                     Text("Taste").tag(KeyBinding.Kind.key)
                     Text("Doppelklick Bildmitte").tag(KeyBinding.Kind.doubleClick)
                     Text("Nichts").tag(KeyBinding.Kind.none)
@@ -48,7 +48,7 @@ struct KeyRecorder: View {
         Button {
             isRecording ? stop() : start()
         } label: {
-            Text(isRecording ? "Taste drücken …" : binding.label)
+            Text(isRecording ? String(localized: "Taste drücken …") : L(binding.label))
                 .font(.body.weight(.medium))
                 .frame(minWidth: 120)
         }

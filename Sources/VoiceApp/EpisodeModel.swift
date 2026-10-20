@@ -14,9 +14,9 @@ enum ShowSort: String, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .custom: return "Eigene Reihenfolge"
-        case .recent: return "Zuletzt gesehen"
-        case .name: return "Name (A–Z)"
+        case .custom: return String(localized: "Eigene Reihenfolge")
+        case .recent: return String(localized: "Zuletzt gesehen")
+        case .name: return String(localized: "Name (A–Z)")
         }
     }
 
@@ -38,6 +38,12 @@ final class EpisodeModel: ObservableObject {
     @Published private(set) var lastPlayedRef: EpisodeRef?
     /// Wann zuletzt eine Folge der Show gestartet wurde
     @Published private(set) var playedAt: [String: Date] = [:]
+    /// Tasten-Presets (eingebaute Vorlagen zuerst)
+    @Published private(set) var presets: [KeyPreset] = KeyPreset.builtIns
+    /// Einstellungen und Zustand des Servers (Mac am Fernseher)
+    @Published private(set) var serverSettings: ServerSettings?
+    @Published private(set) var serverStatus: ServerStatus?
+    @Published private(set) var volume: VolumeResponse?
     @Published private(set) var isLoading = false
     @Published private(set) var hasLoaded = false
     /// `Episode.key` der Folge, die gerade gestartet wird
@@ -120,7 +126,7 @@ final class EpisodeModel: ObservableObject {
     func load(refresh: Bool = false) async {
         guard !isLoading else { return }
         guard let client = client else {
-            errorMessage = "Noch kein Server gefunden. Läuft der TV-Launcher-Server am Mac am Fernseher? Adresse sonst in den Einstellungen (⌘,) eintragen."
+            errorMessage = String(localized: "Noch kein Server gefunden. Läuft der TV-Launcher-Server am Mac am Fernseher? Adresse sonst in den Einstellungen (⌘,) eintragen.")
             return
         }
         isLoading = true
@@ -131,7 +137,7 @@ final class EpisodeModel: ObservableObject {
         do {
             apply(try await client.shows())
         } catch {
-            errorMessage = "Mac mini nicht erreichbar: \(error.localizedDescription)"
+            errorMessage = String(localized: "Mac mini nicht erreichbar: \(error.localizedDescription)")
             return
         }
         // Folgen aller Shows parallel laden
@@ -174,7 +180,7 @@ final class EpisodeModel: ObservableObject {
     // MARK: - Shows verwalten (Einstellungen)
 
     func saveShow(_ show: Show) async throws {
-        guard let client = client else { throw ClientError(message: "Ungültige Server-Adresse") }
+        guard let client = client else { throw ClientError(message: String(localized: "Ungültige Server-Adresse")) }
         apply(try await client.saveShow(show))
         // Folgen im Hintergrund nachladen (neue Joyn-Shows brauchen beim ersten Mal etwas länger)
         let id = show.id
@@ -184,14 +190,14 @@ final class EpisodeModel: ObservableObject {
                 episodesByShow[id] = catalog.episodes
                 lastPlayedByShow[id] = catalog.lastPlayedID
             case .failure(let error):
-                errorMessage = "\(self.show(id)?.name ?? id): \(error.localizedDescription)"
+                errorMessage = String(localized: "\(self.show(id)?.name ?? id): \(error.localizedDescription)")
             }
         }
     }
 
     /// Eigene Reihenfolge speichern
     func reorderShows(_ ids: [String]) async throws {
-        guard let client = client else { throw ClientError(message: "Ungültige Server-Adresse") }
+        guard let client = client else { throw ClientError(message: String(localized: "Ungültige Server-Adresse")) }
         // Sofort anzeigen, dann auf dem Server speichern
         let position = Dictionary(uniqueKeysWithValues: ids.enumerated().map { ($1, $0) })
         shows.sort { position[$0.id, default: .max] < position[$1.id, default: .max] }
@@ -208,24 +214,177 @@ final class EpisodeModel: ObservableObject {
         do {
             try await reorderShows(ids)
         } catch {
-            errorMessage = "Reihenfolge nicht gespeichert: \(error.localizedDescription)"
+            errorMessage = String(localized: "Reihenfolge nicht gespeichert: \(error.localizedDescription)")
         }
     }
 
+    // MARK: - Einstellungen, Status & Wartung des Servers
+
+    func loadServerInfo() async {
+        guard let client = client else { return }
+        async let settings = try? client.get("api/settings", as: ServerSettings.self)
+        async let status = try? client.get("api/status", as: ServerStatus.self)
+        serverSettings = await settings ?? serverSettings
+        if let status = await status {
+            serverStatus = status
+            if let level = status.volume, let muted = status.muted { volume = VolumeResponse(volume: level, muted: muted) }
+        }
+    }
+
+    func saveServerSettings(_ settings: ServerSettings) async {
+        guard let client = client else { return }
+        do {
+            serverSettings = try await client.saveSettings(settings)
+        } catch {
+            errorMessage = String(localized: "Einstellungen nicht gesichert: \(error.localizedDescription)")
+        }
+    }
+
+    func changeVolume(_ action: String, value: Int? = nil) async {
+        guard let client = client else { return }
+        do {
+            let response = try await client.volume(action, value: value)
+            if response.volume != nil { volume = response }
+            if let message = response.message { showStatus(message) }
+        } catch {
+            errorMessage = String(localized: "Lautstärke: \(error.localizedDescription)")
+        }
+    }
+
+    func setSleepTimer(minutes: Int) async {
+        guard let client = client else { return }
+        do {
+            serverStatus = try await client.sleep(minutes: minutes)
+            showStatus(minutes > 0 ? String(localized: "Sleep-Timer: \(minutes) Min.") : String(localized: "Sleep-Timer aus"))
+        } catch {
+            errorMessage = String(localized: "Sleep-Timer: \(error.localizedDescription)")
+        }
+    }
+
+    func restartServer() async throws {
+        guard let client = client else { throw ClientError(message: String(localized: "Ungültige Server-Adresse")) }
+        try await client.restart()
+        try? await Task.sleep(nanoseconds: 3_000_000_000)
+        await loadServerInfo()
+    }
+
+    func serverLog() async throws -> String {
+        guard let client = client else { throw ClientError(message: String(localized: "Ungültige Server-Adresse")) }
+        return try await client.log()
+    }
+
+    func backupData() async throws -> Data {
+        guard let client = client else { throw ClientError(message: String(localized: "Ungültige Server-Adresse")) }
+        return try await client.backup()
+    }
+
+    func restore(_ data: Data) async throws {
+        guard let client = client else { throw ClientError(message: String(localized: "Ungültige Server-Adresse")) }
+        apply(try await client.restore(data))
+        await loadPresets()
+        await loadServerInfo()
+        await load()
+    }
+
+    // MARK: - Tasten-Presets
+
+    func loadPresets() async {
+        guard let client = client, let response = try? await client.presets() else { return }
+        presets = response.presets
+    }
+
+    /// Belegung unter einem Namen sichern (gleicher Name ersetzt ein eigenes Preset)
+    func savePreset(name: String, controls: ShowControls) async throws {
+        guard let client = client else { throw ClientError(message: String(localized: "Ungültige Server-Adresse")) }
+        presets = try await client.savePreset(KeyPreset(id: "", name: name, controls: controls)).presets
+        showStatus(String(localized: "Preset „\(name)“ gesichert"))
+    }
+
+    func deletePreset(_ preset: KeyPreset) async throws {
+        guard let client = client else { throw ClientError(message: String(localized: "Ungültige Server-Adresse")) }
+        presets = try await client.deletePreset(preset.id).presets
+    }
+
     func deleteShow(_ id: String) async throws {
-        guard let client = client else { throw ClientError(message: "Ungültige Server-Adresse") }
+        guard let client = client else { throw ClientError(message: String(localized: "Ungültige Server-Adresse")) }
         apply(try await client.deleteShow(id))
     }
 
     /// Joyn-Film merken und auf Wunsch sofort am Mac mini starten
     func addMovie(_ movie: String, play: Bool) async throws {
-        guard let client = client else { throw ClientError(message: "Ungültige Server-Adresse") }
+        guard let client = client else { throw ClientError(message: String(localized: "Ungültige Server-Adresse")) }
         let response = try await client.movie(movie, play: play)
         apply(try await client.shows())
         let catalog = try await client.catalog(show: Show.moviesID, refresh: false)
         episodesByShow[Show.moviesID] = catalog.episodes
         lastPlayedByShow[Show.moviesID] = catalog.lastPlayedID
         showStatus(response.message)
+    }
+
+    /// Einzelnes YouTube-Video in „YouTube-Videos“ merken und auf Wunsch sofort am Mac mini starten
+    func addYouTubeVideo(_ video: String, play: Bool) async throws {
+        guard let client = client else { throw ClientError(message: String(localized: "Ungültige Server-Adresse")) }
+        let response = try await client.youtube(video, play: play)
+        apply(try await client.shows())
+        let catalog = try await client.catalog(show: Show.youtubeVideosID, refresh: false)
+        episodesByShow[Show.youtubeVideosID] = catalog.episodes
+        lastPlayedByShow[Show.youtubeVideosID] = catalog.lastPlayedID
+        if play {
+            lastPlayedRef = catalog.lastPlayedID.map { EpisodeRef(show: Show.youtubeVideosID, id: $0) } ?? lastPlayedRef
+            playedAt[Show.youtubeVideosID] = Date()
+        }
+        showStatus(response.message)
+    }
+
+    /// Was ein eingefügter Link ist: YouTube-Video oder Joyn-Film (sonst `nil`)
+    enum PlayableLink {
+        case youtube(String)
+        case joynMovie(String)
+
+        init?(_ text: String) {
+            let input = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !input.isEmpty, !input.contains(" ") else { return nil }
+            if input.lowercased().contains("youtu"), Show.youtubeVideoID(in: input) != nil {
+                self = .youtube(input)
+            } else if let url = URL(string: input.contains("://") ? input : "https://\(input)"),
+                      let slug = Show.joynMovie(in: url) {
+                self = .joynMovie(slug)
+            } else {
+                return nil
+            }
+        }
+
+        var label: String {
+            switch self {
+            case .youtube: return String(localized: "YouTube-Video")
+            case .joynMovie: return String(localized: "Joyn-Film")
+            }
+        }
+    }
+
+    /// YouTube-Video oder Joyn-Film aus einem Link sofort am Mac mini starten
+    func playLink(_ text: String) async throws {
+        switch PlayableLink(text) {
+        case .youtube(let link)?: try await addYouTubeVideo(link, play: true)
+        case .joynMovie(let slug)?:
+            try await addMovie(slug, play: true)
+            lastPlayedRef = EpisodeRef(show: Show.moviesID, id: slug)
+            playedAt[Show.moviesID] = Date()
+        case nil: throw ClientError(message: String(localized: "Kein YouTube-Video und kein Joyn-Film erkannt."))
+        }
+    }
+
+    /// Verlauf „YouTube-Videos“ leeren
+    func clearYouTubeHistory() async {
+        guard let client = client else { return }
+        do {
+            apply(try await client.clearYouTubeHistory())
+            episodesByShow[Show.youtubeVideosID] = []
+            lastPlayedByShow[Show.youtubeVideosID] = nil
+            showStatus(String(localized: "YouTube-Verlauf gelöscht"))
+        } catch {
+            errorMessage = String(localized: "Verlauf nicht gelöscht: \(error.localizedDescription)")
+        }
     }
 
     // MARK: - Abspielen & Steuern
@@ -242,7 +401,7 @@ final class EpisodeModel: ObservableObject {
             showStatus(response.message)
             errorMessage = nil
         } catch {
-            errorMessage = "Abspielen fehlgeschlagen: \(error.localizedDescription)"
+            errorMessage = String(localized: "Abspielen fehlgeschlagen: \(error.localizedDescription)")
         }
     }
 
@@ -253,7 +412,7 @@ final class EpisodeModel: ObservableObject {
             showStatus(response.message)
             errorMessage = nil
         } catch {
-            errorMessage = "Steuerung fehlgeschlagen: \(error.localizedDescription)"
+            errorMessage = String(localized: "Steuerung fehlgeschlagen: \(error.localizedDescription)")
         }
     }
 

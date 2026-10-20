@@ -16,6 +16,12 @@ actor ServerState {
         var lastPlayedByShow: [String: String]
         /// Wann zuletzt eine Folge der Show gestartet wurde (fehlt in älteren Daten)
         var playedAt: [String: Date]?
+        /// Stand der Tastenbelegungen: 1 = Untertitel-Taste für YouTube ergänzt
+        var controlsVersion: Int?
+        /// Eigene Tasten-Presets
+        var presets: [KeyPreset]?
+        /// Einstellungen des Servers (fehlt in älteren Daten → Standard)
+        var settings: ServerSettings?
     }
 
     private let file: URL
@@ -27,7 +33,7 @@ actor ServerState {
     init(file: URL, legacyFile: URL, defaultStartDelay: Double) {
         self.file = file
         if let saved = (try? Data(contentsOf: file)).flatMap({ try? JSONCoding.decoder.decode(Stored.self, from: $0) }) {
-            data = saved
+            data = Self.migrated(saved)
         } else {
             var theVoice = Show.theVoice
             theVoice.controls.startDelay = defaultStartDelay
@@ -42,6 +48,24 @@ actor ServerState {
                 serverLog("Alten Stand übernommen (status.json).")
             }
         }
+    }
+
+    /// Ältere Daten: YouTube-Shows bekommen Untertitel (C) und Lautstärke-Tasten (↑/↓/M) – wird beim nächsten Speichern gesichert
+    private static func migrated(_ stored: Stored) -> Stored {
+        var stored = stored
+        guard (stored.controlsVersion ?? 0) < 2 else { return stored }
+        for index in stored.shows.indices
+        where stored.shows[index].kind == .youtube || stored.shows[index].id == Show.youtubeVideosID {
+            var controls = stored.shows[index].controls
+            let youtube = ShowControls.youtubeDefault
+            if controls.subtitles.kind == .none { controls.subtitles = youtube.subtitles }
+            if controls.volumeUp.kind == .none { controls.volumeUp = youtube.volumeUp }
+            if controls.volumeDown.kind == .none { controls.volumeDown = youtube.volumeDown }
+            if controls.mute.kind == .none { controls.mute = youtube.mute }
+            stored.shows[index].controls = controls
+        }
+        stored.controlsVersion = 2
+        return stored
     }
 
     // MARK: - Shows
@@ -108,6 +132,67 @@ actor ServerState {
         data.lastPlayed = ref
         data.lastPlayedByShow[ref.show] = ref.id
         data.playedAt = (data.playedAt ?? [:]).merging([ref.show: Date()]) { _, new in new }
+        save()
+    }
+
+    /// „Zuletzt gespielt“ einer Show vergessen (Verlauf löschen). `lastPlayed` bleibt, damit die
+    /// Fernbedienung weiter die Tasten der laufenden Show nutzt.
+    func forgetPlayed(show: String) {
+        data.lastPlayedByShow[show] = nil
+        save()
+    }
+
+    // MARK: - Einstellungen & Sicherung
+
+    var settings: ServerSettings { data.settings ?? ServerSettings() }
+
+    func setSettings(_ settings: ServerSettings) {
+        data.settings = settings.clamped
+        save()
+    }
+
+    var backup: BackupFile {
+        BackupFile(shows: data.shows, presets: data.presets ?? [], settings: settings)
+    }
+
+    /// Ersetzt Shows, eigene Presets und Einstellungen. Zwischengespeicherte Folgen bleiben für Shows, die es weiter gibt.
+    func restore(_ backup: BackupFile) {
+        data.shows = backup.shows
+        data.presets = backup.presets.filter { !$0.isBuiltIn }
+        data.settings = backup.settings.clamped
+        let ids = Set(backup.shows.map(\.id))
+        data.catalogs = data.catalogs.filter { ids.contains($0.key) }
+        data.lastPlayedByShow = data.lastPlayedByShow.filter { ids.contains($0.key) }
+        if let last = data.lastPlayed, !ids.contains(last.show) { data.lastPlayed = nil }
+        save()
+    }
+
+    // MARK: - Tasten-Presets
+
+    /// Eingebaute Vorlagen zuerst, dann die eigenen
+    var presetsResponse: PresetsResponse {
+        PresetsResponse(presets: KeyPreset.builtIns + (data.presets ?? []))
+    }
+
+    /// Legt ein Preset an; ein eigenes Preset mit gleichem Namen wird ersetzt.
+    func savePreset(_ preset: KeyPreset) {
+        var list = data.presets ?? []
+        var preset = preset
+        preset.builtIn = nil
+        if let index = list.firstIndex(where: {
+            $0.id == preset.id || $0.name.localizedCaseInsensitiveCompare(preset.name) == .orderedSame
+        }) {
+            preset.id = list[index].id
+            list[index] = preset
+        } else {
+            list.append(preset)
+        }
+        data.presets = list
+        save()
+    }
+
+    func deletePreset(_ id: String) {
+        data.presets?.removeAll { $0.id == id }
         save()
     }
 

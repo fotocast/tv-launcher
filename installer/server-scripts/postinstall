@@ -1,4 +1,15 @@
 #!/bin/bash
-# Runs as root after the server component is installed
+# Runs as root after the server component is installed.
 bash "/Library/Application Support/TV Launcher/Server/setup-server.sh"
+
+# A TV Mac usually has no keyboard: don't open the Bluetooth setup assistant at startup
+defaults write /Library/Preferences/com.apple.Bluetooth BluetoothAutoSeekKeyboard -bool false
+defaults write /Library/Preferences/com.apple.Bluetooth BluetoothAutoSeekPointingDevice -bool false
+
+# Show the user where to allow Accessibility for VoiceServer
+USER_NAME="$(stat -f%Su /dev/console)"
+if [ -n "$USER_NAME" ] && [ "$USER_NAME" != "root" ] && [ "$USER_NAME" != "loginwindow" ]; then
+  launchctl asuser "$(id -u "$USER_NAME")" sudo -u "$USER_NAME" \
+    open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility" || true
+fi
 exit 0

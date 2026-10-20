@@ -2,7 +2,7 @@ import SwiftUI
 import AppKit
 import VoiceCore
 
-/// Einstellungen (⌘,): Allgemein und Shows
+/// Einstellungen (⌘,)
 struct SettingsView: View {
     var body: some View {
         TabView {
@@ -10,6 +10,16 @@ struct SettingsView: View {
                 .tabItem { Label("Allgemein", systemImage: "gearshape") }
             ShowsSettingsView()
                 .tabItem { Label("Shows", systemImage: "tv") }
+            PlaybackSettingsView()
+                .tabItem { Label("Wiedergabe", systemImage: "play.rectangle") }
+            HomeSettingsView()
+                .tabItem { Label("Startseite", systemImage: "house") }
+            RemoteSettingsView()
+                .tabItem { Label("Fernsteuerung", systemImage: "appletvremote.gen4") }
+            MacMiniSettingsView()
+                .tabItem { Label("Mac mini", systemImage: "macmini") }
+            BackupSettingsView()
+                .tabItem { Label("Sicherung", systemImage: "externaldrive") }
         }
     }
 }
@@ -18,12 +28,32 @@ struct SettingsView: View {
 
 struct GeneralSettingsView: View {
     @AppStorage(AppSettings.serverKey) private var server = AppSettings.defaultServer
-    @AppStorage(AppSettings.pointerSpeedKey) private var pointerSpeed = AppSettings.defaultPointerSpeed
+    @AppStorage(AppSettings.languageKey) private var language = "system"
+    @State private var languageAtStart = UserDefaults.standard.string(forKey: AppSettings.languageKey) ?? "system"
     @EnvironmentObject private var discovery: ServerDiscovery
     @EnvironmentObject private var model: EpisodeModel
 
     var body: some View {
         Form {
+            Section {
+                Picker("Sprache", selection: $language) {
+                    Text("Wie das System").tag("system")
+                    Text("Deutsch").tag("de")
+                    Text("English").tag("en")
+                }
+                .onChange(of: language) { AppLanguage.apply($0) }
+                if language != languageAtStart {
+                    HStack {
+                        Text("Die neue Sprache gilt nach einem Neustart der App.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Jetzt neu starten") { AppLanguage.relaunch() }
+                    }
+                }
+            } header: {
+                Text("Sprache")
+            }
             Section {
                 TextField("Server-Adresse", text: $server, prompt: Text("http://Mac-mini.local:8081"))
                     .onSubmit { reload() }
@@ -55,21 +85,9 @@ struct GeneralSettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            Section {
-                Slider(value: $pointerSpeed, in: 0.5...4, step: 0.25) {
-                    Text("Zeigertempo")
-                } minimumValueLabel: {
-                    Image(systemName: "tortoise")
-                } maximumValueLabel: {
-                    Image(systemName: "hare")
-                }
-                Text("Für „Tastatur & Trackpad übertragen“: wie schnell sich der Zeiger am Fernseher bewegt.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
         }
         .formStyle(.grouped)
-        .frame(width: 480)
+        .frame(width: 520)
         .fixedSize(horizontal: false, vertical: true)
         .onAppear { discovery.start() }
     }
@@ -91,6 +109,8 @@ struct ShowsSettingsView: View {
     @State private var errorMessage: String?
     @State private var isSaving = false
     @State private var confirmDelete = false
+    @State private var askPresetName = false
+    @State private var presetName = ""
 
     private var saved: Show? { selection.flatMap(model.show) }
     private var hasChanges: Bool { draft != nil && draft != saved }
@@ -122,7 +142,7 @@ struct ShowsSettingsView: View {
                 .environmentObject(model)
         }
         .sheet(isPresented: $showYouTube) {
-            YouTubeAddSheet { id in selection = id }
+            YouTubeBrowserSheet { id in selection = id }
                 .environmentObject(model)
         }
         .onChange(of: selection) { _ in
@@ -135,6 +155,7 @@ struct ShowsSettingsView: View {
         }
         .task {
             if model.shows.isEmpty { await model.load() }
+            await model.loadPresets()
             if selection == nil { selection = model.shows.first?.id }
             draft = saved
         }
@@ -183,7 +204,7 @@ struct ShowsSettingsView: View {
             HStack(spacing: 2) {
                 Menu {
                     Button("Joyn-Serie oder -Film suchen …") { showBrowser = true }
-                    Button("YouTube-Kanal hinzufügen …") { showYouTube = true }
+                    Button("YouTube-Kanal suchen …") { showYouTube = true }
                     Button("Eigene Show mit Links") { addCustomShow() }
                 } label: {
                     Image(systemName: "plus")
@@ -240,7 +261,7 @@ struct ShowsSettingsView: View {
                 if show.wrappedValue.kind == .movies {
                     Section {
                         if show.wrappedValue.links.isEmpty {
-                            Text("Noch keine Filme. Im Hauptfenster links unten „Joyn-Film suchen & starten …“.")
+                            Text("Noch keine Filme. Im Hauptfenster links unten „Joyn“ öffnen oder einen Filmlink einfügen.")
                                 .foregroundStyle(.secondary)
                         }
                         ForEach(show.wrappedValue.links) { link in
@@ -301,10 +322,14 @@ struct ShowsSettingsView: View {
                     KeyBindingRow(title: "Zurückspulen", binding: show.controls.back)
                     KeyBindingRow(title: "Vorspulen", binding: show.controls.forward)
                     KeyBindingRow(title: "Vollbild", binding: show.controls.fullscreen)
+                    KeyBindingRow(title: "Untertitel", binding: show.controls.subtitles)
+                    KeyBindingRow(title: "Lauter", binding: show.controls.volumeUp)
+                    KeyBindingRow(title: "Leiser", binding: show.controls.volumeDown)
+                    KeyBindingRow(title: "Ton aus/an", binding: show.controls.mute)
                 } header: {
                     Text("Tasten am Mac mini")
                 } footer: {
-                    Text("Diese Tasten drückt der Mac mini, wenn du in der App oder Web-App die Knöpfe benutzt.")
+                    Text("Diese Tasten drückt der Mac mini, wenn du in der App oder Web-App die Knöpfe benutzt. Untertitel: YouTube C; Joyn hat keine Taste dafür. Lautstärke-Tasten werden nur genutzt, wenn der Mac die Lautstärke nicht selbst regeln kann (Ton über HDMI).")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -322,18 +347,7 @@ struct ShowsSettingsView: View {
 
             Divider()
             HStack(spacing: 10) {
-                Button("Standard-Tasten") {
-                    switch show.wrappedValue.kind {
-                    case .joyn, .movies: draft?.controls = .joynDefault
-                    case .youtube: draft?.controls = .youtubeDefault
-                    case .custom: draft?.controls = .customDefault
-                    }
-                }
-                .help(show.wrappedValue.kind == .youtube
-                      ? "K, J, L, F; K nach 5 s"
-                      : show.wrappedValue.kind == .custom
-                        ? "Leertaste, ←, →, F; nichts beim Start"
-                        : "Leertaste, ←, →, Doppelklick; Leertaste nach 10 s")
+                presetMenu(current: show.wrappedValue.controls)
                 if let errorMessage {
                     Text(errorMessage)
                         .font(.callout)
@@ -353,12 +367,74 @@ struct ShowsSettingsView: View {
         }
     }
 
+    /// Tasten-Presets: anwenden, aktuelle Belegung sichern, eigene löschen
+    private func presetMenu(current: ShowControls) -> some View {
+        let own = model.presets.filter { !$0.isBuiltIn }
+        return Menu {
+            Section("Vorlagen") {
+                ForEach(model.presets.filter(\.isBuiltIn)) { preset in
+                    Button { draft?.controls = preset.controls } label: {
+                        Text(preset.name + (preset.controls == current ? "  ✓" : ""))
+                    }
+                    .help(preset.summary)
+                }
+            }
+            if !own.isEmpty {
+                Section("Eigene Presets") {
+                    ForEach(own) { preset in
+                        Button { draft?.controls = preset.controls } label: {
+                            Text(preset.name + (preset.controls == current ? "  ✓" : ""))
+                        }
+                        .help(preset.summary)
+                    }
+                }
+            }
+            Divider()
+            Button("Aktuelle Belegung als Preset sichern …") {
+                presetName = own.first { $0.controls == current }?.name ?? ""
+                askPresetName = true
+            }
+            if !own.isEmpty {
+                Menu("Preset löschen") {
+                    ForEach(own) { preset in
+                        Button(preset.name, role: .destructive) {
+                            Task {
+                                do { try await model.deletePreset(preset) } catch { errorMessage = error.localizedDescription }
+                            }
+                        }
+                    }
+                }
+            }
+        } label: {
+            Label("Tasten-Preset", systemImage: "keyboard")
+        }
+        .fixedSize()
+        .help("Gespeicherte Tastenbelegung übernehmen oder die aktuelle als Preset sichern")
+        .alert("Tastenbelegung als Preset sichern", isPresented: $askPresetName) {
+            TextField("Name, z. B. ARD Mediathek", text: $presetName)
+            Button("Sichern") {
+                let name = presetName.trimmingCharacters(in: .whitespaces)
+                guard !name.isEmpty else { return }
+                Task {
+                    do {
+                        try await model.savePreset(name: name, controls: current)
+                    } catch {
+                        errorMessage = error.localizedDescription
+                    }
+                }
+            }
+            Button("Abbrechen", role: .cancel) {}
+        } message: {
+            Text("Das Preset steht danach bei jeder Show zur Auswahl – auch in der Web-App. Gleicher Name ersetzt ein vorhandenes Preset.")
+        }
+    }
+
     static func kindName(_ kind: Show.Kind) -> String {
         switch kind {
-        case .joyn: return "Joyn-Serie"
-        case .youtube: return "YouTube-Kanal"
-        case .movies: return "Joyn-Filme"
-        case .custom: return "Eigene Links"
+        case .joyn: return String(localized: "Joyn-Serie")
+        case .youtube: return String(localized: "YouTube-Kanal")
+        case .movies: return String(localized: "Joyn-Filme")
+        case .custom: return String(localized: "Eigene Links")
         }
     }
 

@@ -24,7 +24,7 @@ struct RoundButtonStyle: ButtonStyle {
     }
 }
 
-/// Die vier Steuerknöpfe, in Leiste und Fernbedienung wiederverwendet.
+/// Die Steuerknöpfe, in Leiste und Fernbedienung wiederverwendet.
 struct TransportButtons: View {
     @EnvironmentObject private var model: EpisodeModel
     var size: CGFloat = 44
@@ -36,7 +36,21 @@ struct TransportButtons: View {
             button(.playPause, icon: "playpause.fill", help: "Pause oder weiter", scale: 1.25, prominent: true)
             button(.forward, icon: "goforward.10", help: "10 Sekunden vor", scale: 1)
             button(.fullscreen, icon: "arrow.up.left.and.arrow.down.right", help: "Vollbild an/aus", scale: 1)
+            button(.subtitles, icon: "captions.bubble", help: subtitlesHelp, scale: 1)
+                .disabled(!hasSubtitles)
+            button(.closeTab, icon: "xmark.rectangle", help: "Browser-Tab am Mac mini schließen (⌘W)", scale: 1)
         }
+    }
+
+    /// Untertitel gehen nur, wenn die zuletzt gestartete Show eine Taste dafür hat (YouTube: C, Joyn: keine)
+    private var hasSubtitles: Bool {
+        (model.lastPlayedShow?.controls.subtitles.kind ?? .none) != .none
+    }
+
+    private var subtitlesHelp: String {
+        guard let show = model.lastPlayedShow else { return String(localized: "Untertitel an/aus") }
+        return hasSubtitles ? String(localized: "Untertitel an/aus (\(L(show.controls.subtitles.label)))")
+            : String(localized: "Untertitel: für „\(show.displayName)“ gibt es keine Taste (z. B. Joyn) – einstellbar unter Einstellungen → Shows")
     }
 
     private func button(_ action: PlayerAction, icon: String, help: String,
@@ -47,7 +61,7 @@ struct TransportButtons: View {
             Image(systemName: icon)
         }
         .buttonStyle(RoundButtonStyle(size: size * scale, prominent: prominent))
-        .help(help)
+        .help(LocalizedStringKey(help))
     }
 }
 
@@ -60,7 +74,7 @@ struct PlayerBar: View {
         HStack(spacing: 16) {
             VStack(alignment: .leading, spacing: 2) {
                 if let last = model.lastPlayed {
-                    Text("\(model.show(last.show)?.name ?? "") · \(last.code)")
+                    Text("\(model.show(last.show)?.displayName ?? "") · \(last.code)")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
                     Text(last.title)
@@ -116,9 +130,21 @@ struct RemoteView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 32) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("Video-Link abspielen", systemImage: "link")
+                        .font(.headline)
+                    InstantPlayField()
+                        .controlSize(.large)
+                }
+                .padding(18)
+                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Color.primary.opacity(0.08)))
+
                 nowPlaying
 
                 TransportButtons(size: 76, spacing: 26)
+
+                VolumeAndSleepBar()
 
                 if let error = model.errorMessage {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
@@ -142,7 +168,7 @@ struct RemoteView: View {
     private var nowPlaying: some View {
         if let last = model.lastPlayed {
             VStack(spacing: 4) {
-                Text("ZULETZT GESTARTET · \((model.show(last.show)?.name ?? "").uppercased()) · \(last.code)")
+                Text("ZULETZT GESTARTET · \((model.show(last.show)?.displayName ?? "").uppercased()) · \(last.code)")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                 Text(last.title)
@@ -160,13 +186,13 @@ struct RemoteView: View {
     private var modeDescription: String {
         switch (forwarder.mode, forwarder.isActive) {
         case (.pointer, true):
-            return "Aktiv: Alle Tasten, Zeigerbewegungen, Klicks und Scrollen gehen an den Mac mini. Beenden mit ⌘⎋."
+            return String(localized: "Aktiv: Alle Tasten, Zeigerbewegungen, Klicks und Scrollen gehen an den Mac mini. Beenden mit ⌘⎋.")
         case (.pointer, false):
-            return "Steuert den Mac mini, als säßest du davor. Der Mauszeiger wird hier ausgeblendet. Beenden mit ⌘⎋ oder durch Wechsel in eine andere App."
+            return String(localized: "Steuert den Mac mini, als säßest du davor. Der Mauszeiger wird hier ausgeblendet. Beenden mit ⌘⎋ oder durch Wechsel in eine andere App.")
         case (.screen, true):
-            return "Aktiv: Klicke im Bild unten auf eine Stelle – erst dann springt der Zeiger am Mac mini dorthin und klickt. Tasten werden übertragen. Beenden mit ⌘⎋."
+            return String(localized: "Aktiv: Klicke im Bild unten auf eine Stelle – erst dann springt der Zeiger am Mac mini dorthin und klickt. Tasten werden übertragen. Beenden mit ⌘⎋.")
         case (.screen, false):
-            return "Zeigt ein Bild vom Bildschirm des Mac mini. Ein Klick ins Bild klickt an derselben Stelle – ohne dem verzögerten Zeiger zuzusehen."
+            return String(localized: "Zeigt ein Bild vom Bildschirm des Mac mini. Ein Klick ins Bild klickt an derselben Stelle – ohne dem verzögerten Zeiger zuzusehen.")
         }
     }
 
@@ -232,5 +258,52 @@ struct RemoteView: View {
                 .strokeBorder(forwarder.isActive ? Color.accentColor : Color.primary.opacity(0.08),
                               lineWidth: forwarder.isActive ? 2 : 1)
         )
+    }
+}
+
+/// Lautstärke des Mac mini und Sleep-Timer (Fernbedienung)
+struct VolumeAndSleepBar: View {
+    @EnvironmentObject private var model: EpisodeModel
+    private static let sleepChoices = [15, 30, 45, 60, 90, 120]
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Button { Task { await model.changeVolume("down") } } label: { Image(systemName: "speaker.minus.fill") }
+                .buttonStyle(RoundButtonStyle(size: 44))
+                .help("Leiser")
+            Button { Task { await model.changeVolume("mute") } } label: {
+                Image(systemName: model.volume?.muted == true ? "speaker.slash.fill" : "speaker.fill")
+            }
+            .buttonStyle(RoundButtonStyle(size: 44))
+            .help("Ton aus/an")
+            Button { Task { await model.changeVolume("up") } } label: { Image(systemName: "speaker.plus.fill") }
+                .buttonStyle(RoundButtonStyle(size: 44))
+                .help("Lauter")
+            Text(model.volume.flatMap { v in v.volume.map { v.muted == true ? String(localized: "stumm") : "\($0) %" } } ?? "–")
+                .font(.callout.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 52, alignment: .leading)
+
+            Divider().frame(height: 28)
+
+            Menu {
+                ForEach(Self.sleepChoices, id: \.self) { minutes in
+                    Button("In \(minutes) Minuten") { Task { await model.setSleepTimer(minutes: minutes) } }
+                }
+                if model.serverStatus?.sleepAt != nil {
+                    Divider()
+                    Button("Sleep-Timer aus") { Task { await model.setSleepTimer(minutes: 0) } }
+                }
+            } label: {
+                if let end = model.serverStatus?.sleepAt {
+                    Label("Bis \(end.formatted(date: .omitted, time: .shortened))", systemImage: "moon.zzz.fill")
+                } else {
+                    Label("Sleep-Timer", systemImage: "moon.zzz")
+                }
+            }
+            .fixedSize()
+            .help("Nach Ablauf pausieren und Display ausschalten")
+        }
+        .task { await model.loadServerInfo() }
     }
 }

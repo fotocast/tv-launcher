@@ -23,6 +23,7 @@ do {
     serverLog("TV Launcher Server auf Port \(config.port), Browser: \(config.browser)")
     serverLog("Web-Ordner: \(config.publicDir.path)")
     Player.requestAccessibility()
+    if config.browser.lowercased() == "firefox" { FirefoxSetup.apply() }
 
     // Nach dem Hochfahren ohne Tastatur erscheint oft der Bluetooth-Assistent:
     // die ersten 5 Minuten regelmäßig ausblenden.

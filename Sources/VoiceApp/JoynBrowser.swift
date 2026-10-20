@@ -13,10 +13,29 @@ final class WebBrowserModel: NSObject, ObservableObject {
     @Published private(set) var isLoading = false
     private var observations: [NSKeyValueObservation] = []
 
-    init(start: URL) {
+    /// Videos in der Seite sofort anhalten und stumm schalten (Vorschau in der App,
+    /// abgespielt wird am Fernseher)
+    private static let quietVideos = """
+    (function () {
+      function quiet(v) { try { v.muted = true; v.pause(); } catch (e) {} }
+      document.addEventListener('play', function (e) {
+        if (e.target && e.target.tagName === 'VIDEO') quiet(e.target);
+      }, true);
+      setInterval(function () {
+        document.querySelectorAll('video').forEach(function (v) { if (!v.paused || !v.muted) quiet(v); });
+      }, 800);
+    })();
+    """
+
+    init(start: URL, quietVideos: Bool = false) {
         self.start = start
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
+        if quietVideos {
+            configuration.mediaTypesRequiringUserActionForPlayback = .all
+            configuration.userContentController.addUserScript(
+                WKUserScript(source: Self.quietVideos, injectionTime: .atDocumentStart, forMainFrameOnly: false))
+        }
         webView = WKWebView(frame: .zero, configuration: configuration)
         super.init()
         observations = [
@@ -40,6 +59,27 @@ final class WebBrowserModel: NSObject, ObservableObject {
     }
 
     func goHome() { webView.load(URLRequest(url: start)) }
+
+    /// Adresse öffnen oder – wenn es keine ist – auf YouTube suchen. "@name" öffnet den Kanal.
+    func openOrSearchYouTube(_ text: String) {
+        let input = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !input.isEmpty else { return }
+        var url: URL?
+        if input.hasPrefix("@"), !input.contains(" ") {
+            url = URL(string: "https://www.youtube.com/\(input)")
+        } else if !input.contains(" "), input.contains("."), let candidate = URL(string: input.contains("://") ? input : "https://\(input)"),
+                  candidate.host != nil {
+            url = candidate
+        } else if input.lowercased().contains("youtu"), let id = Show.youtubeVideoID(in: input) {
+            url = URL(string: "https://www.youtube.com/watch?v=\(id)")
+        }
+        if url == nil {
+            var components = URLComponents(string: "https://www.youtube.com/results")!
+            components.queryItems = [URLQueryItem(name: "search_query", value: input)]
+            url = components.url
+        }
+        if let url { webView.load(URLRequest(url: url)) }
+    }
 
     /// Seitentitel ohne Zusätze wie " | Joyn", " - YouTube", " online ansehen"
     var cleanTitle: String {
@@ -261,38 +301,42 @@ struct JoynBrowserSheet: View {
     }
 }
 
-// MARK: - YouTube-Kanal
+// MARK: - YouTube: durchsuchen, Videos starten, Kanäle hinzufügen
 
-struct YouTubeAddSheet: View {
+/// Eingebauter YouTube-Browser. Auf einer Videoseite: am Fernseher abspielen, merken oder den Kanal
+/// hinzufügen; auf einer Kanalseite: Kanal hinzufügen. Videos laufen hier nur stumm und angehalten.
+struct YouTubeBrowserSheet: View {
     @EnvironmentObject private var model: EpisodeModel
     @Environment(\.dismiss) private var dismiss
-    @StateObject private var browser = WebBrowserModel(start: URL(string: "https://www.youtube.com/")!)
-    @State private var address = ""
+    @StateObject private var browser = WebBrowserModel(start: URL(string: "https://www.youtube.com/")!,
+                                                       quietVideos: true)
+    @State private var query = ""
     @State private var name = ""
+    @State private var message: String?
     @State private var errorMessage: String?
     @State private var isWorking = false
+    /// Wird nach dem Hinzufügen eines Kanals bzw. Videos mit der ID der Show aufgerufen
     var onAdded: (String) -> Void = { _ in }
 
-    /// Kanal aus der offenen Seite: Kanalseite oder Video (der Server ermittelt dann den Kanal)
-    private var detected: String? {
-        guard let url = browser.url else { return nil }
-        if let channel = Show.youtubeChannel(in: url) { return channel }
-        if url.path == "/watch" || url.path.hasPrefix("/shorts/") { return url.absoluteString }
-        return nil
+    private var channel: String? { browser.url.flatMap(Show.youtubeChannel(in:)) }
+    /// Offenes Video (watch?v=, /shorts/, /live/)
+    private var video: String? {
+        guard let url = browser.url, Show.youtubeVideoID(in: url.absoluteString) != nil,
+              url.path == "/watch" || url.path.hasPrefix("/shorts/") || url.path.hasPrefix("/live/") else { return nil }
+        return url.absoluteString
     }
 
     var body: some View {
         VStack(spacing: 0) {
             BrowserToolbar(browser: browser)
-            Divider()
             HStack(spacing: 10) {
-                Image(systemName: "link")
+                Image(systemName: "magnifyingglass")
                     .foregroundStyle(.secondary)
-                TextField("Kanal-Adresse oder @Name, z. B. https://www.youtube.com/@tagesschau", text: $address)
+                TextField("YouTube durchsuchen, @Kanal oder Link einfügen", text: $query)
                     .textFieldStyle(.roundedBorder)
-                    .onSubmit { add(address) }
-                Button("Hinzufügen") { add(address) }
-                    .disabled(address.trimmingCharacters(in: .whitespaces).isEmpty || isWorking)
+                    .onSubmit { browser.openOrSearchYouTube(query) }
+                Button("Suchen") { browser.openOrSearchYouTube(query) }
+                    .disabled(query.trimmingCharacters(in: .whitespaces).isEmpty)
             }
             .padding(.horizontal, 12)
             .padding(.bottom, 10)
@@ -303,69 +347,126 @@ struct YouTubeAddSheet: View {
                 .padding(14)
                 .background(.bar)
         }
-        .frame(minWidth: 900, idealWidth: 1100, minHeight: 640, idealHeight: 760)
+        .frame(minWidth: 900, idealWidth: 1100, minHeight: 640, idealHeight: 780)
         .onChange(of: browser.url) { _ in
             errorMessage = nil
-            if detected != nil, Show.youtubeChannel(in: browser.url!) != nil { name = browser.cleanTitle }
-            else { name = "" }
+            message = nil
+            name = channel != nil ? browser.cleanTitle : ""
         }
         .onChange(of: browser.title) { _ in
-            if let url = browser.url, Show.youtubeChannel(in: url) != nil { name = browser.cleanTitle }
+            if channel != nil { name = browser.cleanTitle }
         }
     }
 
     @ViewBuilder
     private var footer: some View {
         HStack(spacing: 12) {
-            if let detected {
+            if let video {
+                videoFooter(video)
+            } else if let channel {
+                channelFooter(channel)
+            } else {
                 Image(systemName: "play.rectangle.fill")
                     .font(.title2)
                     .foregroundStyle(.red)
-                VStack(alignment: .leading, spacing: 2) {
-                    TextField("Name (leer = Kanalname)", text: $name)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 320)
-                    Text(Show.youtubeChannel(in: browser.url!) != nil ? "Kanal erkannt" : "Video erkannt – sein Kanal wird hinzugefügt")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                if let errorMessage {
-                    Text(errorMessage).font(.callout).foregroundStyle(.orange).lineLimit(2)
-                }
-                Spacer()
-                if isWorking { ProgressView().controlSize(.small) }
-                Button("Kanal hinzufügen") { add(detected) }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(isWorking)
-            } else {
-                Image(systemName: "magnifyingglass")
-                    .font(.title2)
-                    .foregroundStyle(.secondary)
-                if let errorMessage {
-                    Text(errorMessage).foregroundStyle(.orange).lineLimit(2)
-                } else {
-                    Text("Öffne einen YouTube-Kanal (oder ein Video davon) – oder gib oben die Kanal-Adresse ein.")
-                        .foregroundStyle(.secondary)
-                }
+                statusText(default: "Öffne ein Video, um es am Fernseher abzuspielen – oder einen Kanal, um ihn hinzuzufügen.")
                 Spacer()
                 if isWorking { ProgressView().controlSize(.small) }
             }
         }
     }
 
-    private func add(_ channel: String) {
-        let input = channel.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !input.isEmpty else { return }
+    @ViewBuilder
+    private func videoFooter(_ video: String) -> some View {
+        Image(systemName: "play.rectangle.fill")
+            .font(.title2)
+            .foregroundStyle(.red)
+        VStack(alignment: .leading, spacing: 2) {
+            Text(browser.cleanTitle.isEmpty ? "YouTube-Video" : browser.cleanTitle)
+                .font(.headline)
+                .lineLimit(1)
+            statusText(default: "Die Vorschau hier bleibt stumm – abgespielt wird am Fernseher.")
+                .font(.caption)
+        }
+        Spacer()
+        if isWorking { ProgressView().controlSize(.small) }
+        Menu {
+            Button("Video merken (in „YouTube-Videos“)") {
+                run(done: "Gemerkt in „YouTube-Videos“") {
+                    try await model.addYouTubeVideo(video, play: false)
+                    onAdded(Show.youtubeVideosID)
+                }
+            }
+            Button("Kanal dieses Videos hinzufügen") { addChannel(video) }
+        } label: {
+            Label("Mehr", systemImage: "ellipsis.circle")
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .disabled(isWorking)
+        Button {
+            run(done: "Läuft am Fernseher") {
+                try await model.addYouTubeVideo(video, play: true)
+                onAdded(Show.youtubeVideosID)
+            }
+        } label: {
+            Label("Am Fernseher abspielen", systemImage: "play.fill")
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.large)
+        .keyboardShortcut(.defaultAction)
+        .disabled(isWorking)
+    }
+
+    @ViewBuilder
+    private func channelFooter(_ channel: String) -> some View {
+        Image(systemName: "person.crop.rectangle.stack.fill")
+            .font(.title2)
+            .foregroundStyle(.red)
+        VStack(alignment: .leading, spacing: 2) {
+            TextField("Name (leer = Kanalname)", text: $name)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 320)
+            statusText(default: "Kanal erkannt – neue Videos und Shorts erscheinen in der App")
+                .font(.caption)
+        }
+        Spacer()
+        if isWorking { ProgressView().controlSize(.small) }
+        Button("Kanal hinzufügen") { addChannel(channel) }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .keyboardShortcut(.defaultAction)
+            .disabled(isWorking)
+    }
+
+    /// Fehler (orange), Erfolgsmeldung (grün) oder der Hinweis
+    @ViewBuilder
+    private func statusText(default text: String) -> some View {
+        if let errorMessage {
+            Text(errorMessage).foregroundStyle(.orange).lineLimit(2)
+        } else if let message {
+            Label(message, systemImage: "checkmark.circle.fill").foregroundStyle(.green).lineLimit(1)
+        } else {
+            Text(text).foregroundStyle(.secondary).lineLimit(2)
+        }
+    }
+
+    private func addChannel(_ input: String) {
+        let show = Show.youtube(channel: input, name: name.trimmingCharacters(in: .whitespaces))
+        run(done: "Kanal hinzugefügt") {
+            try await model.saveShow(show)
+            onAdded(show.id)
+        }
+    }
+
+    private func run(done: String, _ action: @escaping () async throws -> Void) {
         isWorking = true
         errorMessage = nil
+        message = nil
         Task {
             do {
-                let show = Show.youtube(channel: input, name: name.trimmingCharacters(in: .whitespaces))
-                try await model.saveShow(show)
-                onAdded(show.id)
-                dismiss()
+                try await action()
+                message = done
             } catch {
                 errorMessage = error.localizedDescription
             }

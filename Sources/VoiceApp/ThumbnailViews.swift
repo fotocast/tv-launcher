@@ -1,6 +1,28 @@
 import SwiftUI
 import VoiceCore
 
+/// Löscht nach Rückfrage den Verlauf der einzeln gestarteten YouTube-Videos
+struct ClearYouTubeHistoryButton: View {
+    @EnvironmentObject private var model: EpisodeModel
+    @State private var confirm = false
+
+    var body: some View {
+        Button {
+            confirm = true
+        } label: {
+            Label("Verlauf löschen", systemImage: "trash")
+        }
+        .help("Alle zuletzt gestarteten YouTube-Videos aus der Liste entfernen")
+        .confirmationDialog("YouTube-Verlauf löschen?", isPresented: $confirm) {
+            Button("Verlauf löschen", role: .destructive) {
+                Task { await model.clearYouTubeHistory() }
+            }
+        } message: {
+            Text("Die Liste „YouTube-Videos“ wird geleert – in der App und in der Web-App. Kanäle bleiben erhalten.")
+        }
+    }
+}
+
 /// Vorschaubild im Format 16:9 (YouTube-Videos, Joyn-Filme), mit Platzhalter beim Laden.
 struct Thumbnail: View {
     let url: String?
@@ -38,7 +60,7 @@ struct ThumbnailGridView: View {
     var body: some View {
         ScrollView {
             if episodes.isEmpty {
-                Text(emptyText)
+                Text(LocalizedStringKey(emptyText))
                     .font(.title3)
                     .foregroundStyle(.secondary)
                     .padding(40)
@@ -90,7 +112,7 @@ struct ThumbnailCard: View {
                     .font(.headline)
                     .lineLimit(2, reservesSpace: true)
                 if !episode.subtitle.isEmpty {
-                    Text(episode.subtitle)
+                    Text(L(episode.subtitle))
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)

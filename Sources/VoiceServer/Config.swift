@@ -10,6 +10,8 @@ struct ServerConfig {
     var browser = "Firefox"
     /// Wartezeit bis zur Start-Taste für The Voice beim ersten Start (danach pro Show in den Einstellungen)
     var spaceDelay: Double = 10
+    /// Vor jedem Start den Browser beenden, damit sich keine alten Tabs ansammeln (`--close-old-tabs false` = aus)
+    var closeOldTabs = true
     var publicDir: URL
     var dataDir: URL
 
@@ -29,6 +31,7 @@ struct ServerConfig {
             case "--space-delay": if let delay = Double(value) { config.spaceDelay = delay }
             case "--public": config.publicDir = URL(fileURLWithPath: value)
             case "--data": config.dataDir = URL(fileURLWithPath: value)
+            case "--close-old-tabs": config.closeOldTabs = !["false", "0", "nein", "no"].contains(value.lowercased())
             default: serverLog("Unbekannte Option \(key)")
             }
         }

@@ -72,6 +72,8 @@ struct HTTPResponse {
     var status: Int
     var contentType: String
     var body: Data
+    /// Zusätzliche Kopfzeilen, z. B. Content-Disposition für Downloads
+    var headers: [String: String] = [:]
 
     static func json<T: Encodable>(_ value: T, status: Int = 200) -> HTTPResponse {
         let data = (try? JSONCoding.encoder.encode(value)) ?? Data("{}".utf8)
@@ -86,10 +88,11 @@ struct HTTPResponse {
         var head = "HTTP/1.1 \(status) \(Self.reason(status))\r\n"
         head += "Content-Type: \(contentType)\r\n"
         head += "Content-Length: \(body.count)\r\n"
+        for (name, value) in headers.sorted(by: { $0.key < $1.key }) { head += "\(name): \(value)\r\n" }
         // Erlaubt eine Web-App, die woanders läuft (z. B. beim Entwickeln), die API zu nutzen
         head += "Access-Control-Allow-Origin: *\r\n"
         head += "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
-        head += "Access-Control-Allow-Headers: Content-Type\r\n"
+        head += "Access-Control-Allow-Headers: Content-Type, Accept-Language\r\n"
         head += "Cache-Control: no-store\r\n"
         head += "Connection: close\r\n\r\n"
         var data = Data(head.utf8)

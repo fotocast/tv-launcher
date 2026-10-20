@@ -9,7 +9,7 @@ import VoiceCore
 /// - Beenden mit ⌘⎋ oder automatisch, sobald die App in den Hintergrund geht (z. B. ⌘⇥).
 /// - Gesten mit drei/vier Fingern und Tasten wie ⌘⇥ behält macOS für sich.
 ///
-/// **Bildschirm anklicken** (`.screen`): zeigt ein Bildschirmfoto des Mac mini (alle 60 s und nach jedem
+/// **Bildschirm anklicken** (`.screen`): zeigt ein Bildschirmfoto des Mac mini (Abstand einstellbar, Standard 60 s, und nach jedem
 /// Klick neu). Ein Klick ins Bild setzt den Zeiger erst dann an die Stelle und klickt dort – man muss
 /// dem verzögerten Zeiger nicht zusehen. Tasten werden weiterhin übertragen; Beenden mit ⌘⎋.
 @MainActor
@@ -46,9 +46,6 @@ final class InputForwarder: ObservableObject {
     private var pendingRefresh: Task<Void, Never>?
     private var lastPoint: CGPoint?
 
-    /// Abstand zwischen zwei Bildschirmfotos ohne Klick
-    private static let screenshotInterval: UInt64 = 60
-
     /// Tastencode → zugehöriger Modifier (für "flagsChanged"-Ereignisse)
     private static let modifierForKey: [UInt16: NSEvent.ModifierFlags] = [
         55: .command, 54: .command,
@@ -65,7 +62,7 @@ final class InputForwarder: ObservableObject {
     func start() {
         guard !isActive else { return }
         guard let client = APIClient.fromSettings() else {
-            errorMessage = "Ungültige Server-Adresse. Öffne die Einstellungen mit ⌘,"
+            errorMessage = String(localized: "Ungültige Server-Adresse. Öffne die Einstellungen mit ⌘,")
             return
         }
         self.client = client
@@ -103,9 +100,12 @@ final class InputForwarder: ObservableObject {
         case .screen:
             lastPoint = nil
             timer = Task { [weak self] in
+                await self?.loadScreenshot()
                 while !Task.isCancelled {
-                    await self?.loadScreenshot()
-                    try? await Task.sleep(nanoseconds: Self.screenshotInterval * 1_000_000_000)
+                    // Abstand bei jedem Durchlauf neu lesen – Änderungen in den Einstellungen gelten sofort
+                    let interval = AppSettings.screenshotInterval
+                    try? await Task.sleep(nanoseconds: UInt64(max(interval, 2)) * 1_000_000_000)
+                    if interval > 0, !Task.isCancelled { await self?.loadScreenshot() }
                 }
             }
         }
@@ -229,6 +229,11 @@ final class InputForwarder: ObservableObject {
 
     /// Bewegungen und Scrollen werden zusammengefasst, solange noch eine Anfrage unterwegs ist.
     private func enqueue(_ event: InputEvent) {
+        var event = event
+        if event.kind == .scroll, UserDefaults.standard.bool(forKey: AppSettings.invertScrollKey) {
+            event.dx = event.dx.map { -$0 }
+            event.dy = event.dy.map { -$0 }
+        }
         if let last = queue.last, last.kind == event.kind, event.kind == .move || event.kind == .scroll {
             queue[queue.count - 1].dx = (last.dx ?? 0) + (event.dx ?? 0)
             queue[queue.count - 1].dy = (last.dy ?? 0) + (event.dy ?? 0)
@@ -251,7 +256,7 @@ final class InputForwarder: ObservableObject {
                 try await client.sendInput(batch)
                 errorMessage = nil
             } catch {
-                errorMessage = "Übertragung fehlgeschlagen: \(error.localizedDescription)"
+                errorMessage = String(localized: "Übertragung fehlgeschlagen: \(error.localizedDescription)")
             }
             isSending = false
             flush()

@@ -110,6 +110,10 @@ struct APIClient {
         try await post("api/presets/delete", DeleteShowRequest(id: id), as: PresetsResponse.self, timeout: 15)
     }
 
+    func renameFolder(_ from: String, to: String) async throws -> ShowsResponse {
+        try await post("api/folders/rename", FolderRenameRequest(from: from, to: to), as: ShowsResponse.self, timeout: 15)
+    }
+
     func deleteShow(_ id: String) async throws -> ShowsResponse {
         try await post("api/shows/delete", DeleteShowRequest(id: id), as: ShowsResponse.self, timeout: 15)
     }

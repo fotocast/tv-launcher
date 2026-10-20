@@ -24,9 +24,11 @@ public struct Show: Codable, Identifiable, Hashable, Sendable {
     public var channel: String?
     /// Bild der Show (YouTube: Kanalbild)
     public var image: String?
+    /// Ordner, in dem die Show steht (`nil` = kein Ordner). Ordner gibt es nur über ihre Shows.
+    public var folder: String?
 
     public init(id: String, name: String, kind: Kind, links: [ShowLink] = [], controls: ShowControls,
-                channel: String? = nil, image: String? = nil) {
+                channel: String? = nil, image: String? = nil, folder: String? = nil) {
         self.id = id
         self.name = name
         self.kind = kind
@@ -34,6 +36,7 @@ public struct Show: Codable, Identifiable, Hashable, Sendable {
         self.controls = controls
         self.channel = channel
         self.image = image
+        self.folder = folder
     }
 
     public static func joyn(series: String, name: String) -> Show {

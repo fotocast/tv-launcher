@@ -90,6 +90,14 @@ actor ServerState {
         save()
     }
 
+    /// Ordner umbenennen bzw. auflösen (`to` = nil)
+    func renameFolder(_ from: String, to: String?) {
+        for index in data.shows.indices where data.shows[index].folder == from {
+            data.shows[index].folder = to
+        }
+        save()
+    }
+
     func delete(_ id: String) {
         data.shows.removeAll { $0.id == id }
         data.catalogs[id] = nil

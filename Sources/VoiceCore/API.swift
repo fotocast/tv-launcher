@@ -101,10 +101,13 @@ public struct AddShowRequest: Codable, Sendable {
     public var kind: Show.Kind
     public var input: String?
     public var name: String?
-    public init(kind: Show.Kind, input: String?, name: String?) {
+    /// Ordner für die neue Show (optional)
+    public var folder: String?
+    public init(kind: Show.Kind, input: String?, name: String?, folder: String? = nil) {
         self.kind = kind
         self.input = input
         self.name = name
+        self.folder = folder
     }
 }
 
@@ -150,6 +153,16 @@ public struct PresetsResponse: Codable, Sendable {
 public struct PresetRequest: Codable, Sendable {
     public var preset: KeyPreset
     public init(preset: KeyPreset) { self.preset = preset }
+}
+
+/// Ordner umbenennen (`to`) oder auflösen (`to` leer) – betrifft alle Shows mit `folder == from`
+public struct FolderRenameRequest: Codable, Sendable {
+    public var from: String
+    public var to: String
+    public init(from: String, to: String) {
+        self.from = from
+        self.to = to
+    }
 }
 
 public struct DeleteShowRequest: Codable, Sendable {
@@ -332,7 +345,7 @@ public enum Discovery {
 
 /// Versionsnummer von App, Web-App und Server
 public enum TVLauncher {
-    public static let version = "1.2"
+    public static let version = "1.3"
 }
 
 /// Einstellungen, die auf dem Server gespeichert werden und für App und Web-App gelten.

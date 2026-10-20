@@ -175,7 +175,7 @@ struct ShowsSettingsView: View {
                     Label {
                         VStack(alignment: .leading, spacing: 1) {
                             Text(show.name)
-                            Text(Self.kindName(show.kind))
+                            Text(show.folder.map { "\(Self.kindName(show.kind)) · \($0)" } ?? Self.kindName(show.kind))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -242,6 +242,23 @@ struct ShowsSettingsView: View {
             Form {
                 Section("Show") {
                     TextField("Name", text: show.name)
+                    HStack {
+                        TextField("Ordner", text: Binding(get: { show.wrappedValue.folder ?? "" },
+                                                          set: { show.wrappedValue.folder = $0.isEmpty ? nil : $0 }),
+                                  prompt: Text("Kein Ordner"))
+                        Menu {
+                            Button("Kein Ordner") { show.wrappedValue.folder = nil }
+                            if !model.folders.isEmpty { Divider() }
+                            ForEach(model.folders, id: \.self) { folder in
+                                Button(folder) { show.wrappedValue.folder = folder }
+                            }
+                        } label: {
+                            Image(systemName: "folder")
+                        }
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
+                        .help("Vorhandenen Ordner wählen – oder einen neuen Namen eintippen")
+                    }
                     if show.wrappedValue.kind == .joyn, let url = show.wrappedValue.joynURL {
                         LabeledContent("Joyn-Serie") {
                             Link(show.wrappedValue.id, destination: url)

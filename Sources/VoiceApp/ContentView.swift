@@ -22,6 +22,20 @@ struct ContentView: View {
     @State private var showYouTubeBrowser = false
     @AppStorage(AppSettings.showSortKey) private var showSortRaw = ShowSort.custom.rawValue
     @AppStorage(AppSettings.collapsedShowsKey) private var collapsedRaw = ""
+    /// Rückfrage nach einem Ordnernamen: neuer Ordner für eine Show oder Umbenennen
+    @State private var folderPrompt: FolderPrompt?
+    @State private var folderName = ""
+
+    enum FolderPrompt: Identifiable {
+        case new(showID: String)
+        case rename(String)
+        var id: String {
+            switch self {
+            case .new(let id): return "new:" + id
+            case .rename(let name): return "rename:" + name
+            }
+        }
+    }
 
     static func allLabel(_ kind: Show.Kind) -> String {
         switch kind {
@@ -79,13 +93,30 @@ struct ContentView: View {
                 Label("Fernbedienung", systemImage: "appletvremote.gen4.fill")
                     .tag(SidebarItem.remote)
             }
-            ForEach(model.sortedShows(showSort)) { show in
-                Section {
-                    if !collapsed.contains(show.id) {
-                        showItems(show)
+            ForEach(model.sidebarEntries(showSort)) { entry in
+                switch entry {
+                case .show(let show):
+                    Section {
+                        if !collapsed.contains(show.id) {
+                            showItems(show)
+                        }
+                    } header: {
+                        showHeader(show)
                     }
-                } header: {
-                    showHeader(show)
+                case .folder(let name, let shows):
+                    Section {
+                        if !collapsed.contains(Self.folderKey(name)) {
+                            ForEach(shows) { show in
+                                folderShowRow(show)
+                                if !collapsed.contains(show.id) {
+                                    Group { showItems(show) }
+                                        .padding(.leading, 16)
+                                }
+                            }
+                        }
+                    } header: {
+                        folderHeader(name, count: shows.count)
+                    }
                 }
             }
         }
@@ -121,6 +152,14 @@ struct ContentView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
             .background(.bar)
+        }
+        .alert(folderPromptTitle, isPresented: Binding(get: { folderPrompt != nil },
+                                                        set: { if !$0 { folderPrompt = nil } })) {
+            TextField("Name des Ordners", text: $folderName)
+            Button("Sichern") { submitFolderPrompt() }
+            Button("Abbrechen", role: .cancel) {}
+        } message: {
+            Text("Ordner fassen Shows in der Seitenleiste und in der Web-App zusammen.")
         }
         .sheet(isPresented: $showYouTubeBrowser) {
             YouTubeBrowserSheet()
@@ -189,16 +228,121 @@ struct ContentView: View {
         }
         .buttonStyle(.plain)
         .help(isCollapsed ? "Ausklappen" : "Einklappen")
+        .contextMenu { showMenu(show) }
+    }
+
+    /// Kontextmenü einer Show: ein-/ausklappen, verschieben, in einen Ordner legen
+    @ViewBuilder
+    private func showMenu(_ show: Show) -> some View {
+        let isCollapsed = collapsed.contains(show.id)
+        Button(isCollapsed ? "Ausklappen" : "Einklappen") { toggleCollapsed(show.id) }
+        Divider()
+        Button("Nach oben verschieben") { move(show, by: -1) }
+            .disabled(model.shows.first?.id == show.id && showSort == .custom)
+        Button("Nach unten verschieben") { move(show, by: 1) }
+            .disabled(model.shows.last?.id == show.id && showSort == .custom)
+        Divider()
+        Menu("In Ordner legen") {
+            ForEach(model.folders.filter { $0 != show.folder }, id: \.self) { folder in
+                Button(folder) { Task { await model.setFolder(show.id, folder) } }
+            }
+            if model.folders.contains(where: { $0 != show.folder }) { Divider() }
+            Button("Neuer Ordner …") {
+                folderName = ""
+                folderPrompt = .new(showID: show.id)
+            }
+        }
+        if show.folder != nil {
+            Button("Aus dem Ordner nehmen") { Task { await model.setFolder(show.id, nil) } }
+        }
+        Divider()
+        Button("Alle einklappen") { setAllCollapsed(true) }
+        Button("Alle ausklappen") { setAllCollapsed(false) }
+    }
+
+    static func folderKey(_ name: String) -> String { "folder:" + name }
+
+    /// Überschrift eines Ordners: Klick klappt ein/aus, Rechtsklick zum Umbenennen/Auflösen
+    private func folderHeader(_ name: String, count: Int) -> some View {
+        let isCollapsed = collapsed.contains(Self.folderKey(name))
+        return Button {
+            withAnimation(.easeInOut(duration: 0.2)) { toggleCollapsed(Self.folderKey(name)) }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: isCollapsed ? "folder.fill" : "folder")
+                    .foregroundStyle(Color.accentColor)
+                Text(name)
+                Text("\(count)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .rotationEffect(.degrees(isCollapsed ? 0 : 90))
+                    .foregroundStyle(.secondary)
+                    .offset(x: -10)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(isCollapsed ? "Ausklappen" : "Einklappen")
         .contextMenu {
-            Button(isCollapsed ? "Ausklappen" : "Einklappen") { toggleCollapsed(show.id) }
+            Button(isCollapsed ? "Ausklappen" : "Einklappen") { toggleCollapsed(Self.folderKey(name)) }
             Divider()
-            Button("Nach oben verschieben") { move(show, by: -1) }
-                .disabled(model.shows.first?.id == show.id && showSort == .custom)
-            Button("Nach unten verschieben") { move(show, by: 1) }
-                .disabled(model.shows.last?.id == show.id && showSort == .custom)
+            Button("Ordner umbenennen …") {
+                folderName = name
+                folderPrompt = .rename(name)
+            }
+            Button("Ordner auflösen") { Task { await model.renameFolder(name, to: "") } }
             Divider()
             Button("Alle einklappen") { setAllCollapsed(true) }
             Button("Alle ausklappen") { setAllCollapsed(false) }
+        }
+    }
+
+    /// Show innerhalb eines Ordners: Zeile mit Pfeil zum Ein-/Ausklappen
+    private func folderShowRow(_ show: Show) -> some View {
+        let isCollapsed = collapsed.contains(show.id)
+        return Button {
+            withAnimation(.easeInOut(duration: 0.2)) { toggleCollapsed(show.id) }
+        } label: {
+            HStack(spacing: 6) {
+                Label(show.displayName, systemImage: ShowsSettingsView.kindIcon(show.kind))
+                    .fontWeight(.semibold)
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .rotationEffect(.degrees(isCollapsed ? 0 : 90))
+                    .foregroundStyle(.secondary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(isCollapsed ? "Ausklappen" : "Einklappen")
+        .contextMenu { showMenu(show) }
+    }
+
+    private var folderPromptTitle: LocalizedStringKey {
+        if case .rename = folderPrompt { return "Ordner umbenennen" }
+        return "Neuer Ordner"
+    }
+
+    private func submitFolderPrompt() {
+        let name = folderName.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty, let prompt = folderPrompt else { return }
+        Task {
+            switch prompt {
+            case .new(let showID): await model.setFolder(showID, name)
+            case .rename(let old):
+                await model.renameFolder(old, to: name)
+                // Eingeklappt bleibt eingeklappt
+                if collapsed.contains(Self.folderKey(old)) {
+                    var ids = collapsed
+                    ids.remove(Self.folderKey(old))
+                    ids.insert(Self.folderKey(name))
+                    setCollapsed(ids)
+                }
+            }
         }
     }
 
@@ -238,7 +382,7 @@ struct ContentView: View {
 
     private func setAllCollapsed(_ value: Bool) {
         withAnimation(.easeInOut(duration: 0.2)) {
-            setCollapsed(value ? Set(model.shows.map(\.id)) : [])
+            setCollapsed(value ? Set(model.shows.map(\.id) + model.folders.map(Self.folderKey)) : [])
         }
     }
 

@@ -106,6 +106,14 @@ final class Router: @unchecked Sendable {
             }
             await state.deletePreset(body.id)
             return .json(await state.presetsResponse)
+        case ("POST", "/api/folders/rename"):
+            guard let body = try? JSONCoding.decoder.decode(FolderRenameRequest.self, from: request.body) else {
+                return .error("Erwartet wird {\"from\": \"<Ordner>\", \"to\": \"<neuer Name oder leer>\"}", status: 400)
+            }
+            let to = body.to.trimmingCharacters(in: .whitespacesAndNewlines)
+            await state.renameFolder(body.from, to: to.isEmpty ? nil : to)
+            serverLog(to.isEmpty ? "Ordner aufgelöst: \(body.from)" : "Ordner umbenannt: \(body.from) → \(to)")
+            return .json(await state.showsResponse)
         case ("POST", "/api/shows/add"):
             return await addShow(request)
         case ("POST", "/api/shows/delete"):
@@ -184,12 +192,17 @@ final class Router: @unchecked Sendable {
             }
             var show = Show.joyn(series: slug, name: name.isEmpty ? info.name ?? Self.humanized(slug) : name)
             show.image = info.image
+            show.folder = body.folder
             return await save(show)
         case .youtube:
             guard !input.isEmpty else { return .error("Bitte eine Kanal-Adresse oder @Name eingeben.", status: 400) }
-            return await save(Show.youtube(channel: input, name: name))
+            var show = Show.youtube(channel: input, name: name)
+            show.folder = body.folder
+            return await save(show)
         case .custom:
-            return await save(Show.custom(name: name.isEmpty ? "Neue Show" : name))
+            var show = Show.custom(name: name.isEmpty ? "Neue Show" : name)
+            show.folder = body.folder
+            return await save(show)
         case .movies:
             return .error("Filme bitte über /api/movies hinzufügen.", status: 400)
         }
@@ -201,6 +214,8 @@ final class Router: @unchecked Sendable {
 
     private func save(_ show: Show) async -> HTTPResponse {
         var show = show
+        show.folder = show.folder?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if show.folder?.isEmpty == true { show.folder = nil }
         show.name = show.name.trimmingCharacters(in: .whitespacesAndNewlines)
         if show.kind == .youtube {
             // Kanal-Adresse oder @Name in die Kanal-ID umwandeln, Name und Bild übernehmen

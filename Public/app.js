@@ -286,7 +286,64 @@ function renderSidebar() {
   const box = $("side-shows");
   box.replaceChildren();
   const inLibrary = state.tab === "episodes" && !state.search.trim();
+  for (const entry of sidebarEntries()) {
+    if (!entry.folder) {
+      box.appendChild(sidebarShow(entry.shows[0], inLibrary));
+      continue;
+    }
+    const key = folderKey(entry.folder);
+    const collapsed = state.collapsed.has(key);
+    const head = el("button", "side-folder");
+    head.appendChild(icon("folder"));
+    head.appendChild(el("span", "side-folder-name", entry.folder));
+    head.appendChild(el("span", "side-folder-count", String(entry.shows.length)));
+    const chevron = el("span", "side-toggle" + (collapsed ? "" : " open"));
+    chevron.appendChild(icon("chevron"));
+    head.appendChild(chevron);
+    head.addEventListener("click", () => {
+      collapsed ? state.collapsed.delete(key) : state.collapsed.add(key);
+      saveCollapsed();
+      renderSidebar();
+    });
+    box.appendChild(head);
+    if (!collapsed) {
+      const inner = el("div", "side-folder-shows");
+      for (const show of entry.shows) inner.appendChild(sidebarShow(show, inLibrary));
+      box.appendChild(inner);
+    }
+  }
+}
+
+const folderKey = (name) => `folder:${name}`;
+
+// Alle Ordnernamen in der eigenen Reihenfolge
+const folders = () => [...new Set(state.shows.map((s) => s.folder).filter(Boolean))];
+
+// Shows in der gewählten Sortierung, Shows mit Ordner zusammengefasst – wie in der Mac-App
+function sidebarEntries() {
+  const entries = [];
+  const byFolder = new Map();
   for (const show of sortedShows()) {
+    if (show.folder) {
+      if (byFolder.has(show.folder)) byFolder.get(show.folder).shows.push(show);
+      else {
+        const entry = { folder: show.folder, shows: [show] };
+        byFolder.set(show.folder, entry);
+        entries.push(entry);
+      }
+    } else {
+      entries.push({ folder: null, shows: [show] });
+    }
+  }
+  if (state.sort === "name") {
+    const title = (e) => e.folder || e.shows[0].name;
+    entries.sort((a, b) => title(a).localeCompare(title(b), "de", { sensitivity: "base", numeric: true }));
+  }
+  return entries;
+}
+
+function sidebarShow(show, inLibrary) {
+  {
     const sub = show.kind === "joyn" ? seasonsOf(show.id).map((s) => ({ label: `Staffel ${s}`, season: s }))
       : show.kind === "youtube" ? ["Videos", "Shorts"]
         .filter((g) => episodesOf(show.id).some((e) => groupOf(e) === g)).map((g) => ({ label: g, group: g }))
@@ -328,7 +385,7 @@ function renderSidebar() {
         group.appendChild(button);
       }
     }
-    box.appendChild(group);
+    return group;
   }
 }
 
@@ -721,8 +778,12 @@ function renderManage() {
   segmented($("sort-segmented"), SORTS, state.sort, setSort);
   const box = $("manage-list");
   box.replaceChildren();
+  let lastFolder = null;
   state.shows.forEach((show, index) => {
+    if (show.folder && show.folder !== lastFolder) box.appendChild(folderRow(show.folder));
+    lastFolder = show.folder || null;
     const item = el("li");
+    if (show.folder) item.classList.add("in-folder");
     const row = el("div", "manage-row");
     const open = el("button", "manage-open");
     open.appendChild(showArtwork(show, "art-medium"));
@@ -743,6 +804,35 @@ function renderManage() {
     item.appendChild(row);
     box.appendChild(item);
   });
+}
+
+// Überschrift eines Ordners in der Liste „Deine Shows“: umbenennen oder auflösen
+function folderRow(name) {
+  const item = el("li", "folder-row");
+  item.appendChild(icon("folder"));
+  item.appendChild(el("span", "folder-row-name", name));
+  const rename = el("button", "text-button", "Umbenennen");
+  rename.addEventListener("click", async () => {
+    const to = (prompt(t("Neuer Name für den Ordner „{name}“:", { name }), name) || "").trim();
+    if (to && to !== name) await renameFolder(name, to);
+  });
+  const dissolve = el("button", "text-button", "Auflösen");
+  dissolve.addEventListener("click", async () => {
+    if (confirm(t("Ordner „{name}“ auflösen?\nDie Shows bleiben erhalten.", { name }))) await renameFolder(name, "");
+  });
+  item.append(rename, dissolve);
+  return item;
+}
+
+async function renameFolder(from, to) {
+  try {
+    applyShows(await api("/api/folders/rename", { from, to }));
+    if (state.collapsed.delete(folderKey(from)) && to) state.collapsed.add(folderKey(to));
+    saveCollapsed();
+    render();
+  } catch (error) {
+    toast(error.message, true);
+  }
 }
 
 async function moveShow(id, offset) {
@@ -867,6 +957,13 @@ function renderEditor() {
     show.name = value;
     $("sheet-title").textContent = value || "Show";
   })));
+  const folderInput = textInput(show.folder || "", t("Kein Ordner"), (value) => { show.folder = value.trim() || null; });
+  folderInput.setAttribute("list", "folder-list");
+  const list = el("datalist");
+  list.id = "folder-list";
+  for (const name of folders()) list.appendChild(new Option(name, name));
+  group.appendChild(field("Ordner", folderInput));
+  group.appendChild(list);
   body.appendChild(group);
 
   if (show.kind === "custom") {
@@ -1055,7 +1152,19 @@ function renderShows() {
   const box = $("shows");
   box.replaceChildren();
   box.hidden = state.search !== "" || state.shows.length < 2;
-  for (const show of sortedShows()) {
+  for (const entry of sidebarEntries()) {
+    if (entry.folder) {
+      const label = el("span", "chip-folder");
+      label.appendChild(icon("folder"));
+      label.appendChild(document.createTextNode(entry.folder));
+      box.appendChild(label);
+    }
+    for (const show of entry.shows) box.appendChild(showChip(show));
+  }
+}
+
+function showChip(show) {
+  {
     const button = el("button", "", show.name);
     button.setAttribute("role", "tab");
     button.setAttribute("aria-selected", String(show.id === state.show));
@@ -1065,7 +1174,7 @@ function renderShows() {
       try { localStorage.setItem("show", show.id); } catch (_) { /* privater Modus */ }
       render();
     });
-    box.appendChild(button);
+    return button;
   }
 }
 

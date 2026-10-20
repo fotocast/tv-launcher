@@ -29,6 +29,26 @@ enum ShowSort: String, CaseIterable, Identifiable {
     }
 }
 
+/// Eintrag der Seitenleiste: eine einzelne Show oder ein Ordner mit Shows
+enum SidebarEntry: Identifiable {
+    case show(Show)
+    case folder(String, [Show])
+
+    var id: String {
+        switch self {
+        case .show(let show): return show.id
+        case .folder(let name, _): return "folder:" + name
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .show(let show): return show.displayName
+        case .folder(let name, _): return name
+        }
+    }
+}
+
 @MainActor
 final class EpisodeModel: ObservableObject {
     @Published private(set) var shows: [Show] = []
@@ -80,6 +100,35 @@ final class EpisodeModel: ObservableObject {
                 }
             }
         }
+    }
+
+    /// Alle Ordnernamen in der eigenen Reihenfolge
+    var folders: [String] {
+        var seen = Set<String>()
+        return shows.compactMap(\.folder).filter { seen.insert($0).inserted }
+    }
+
+    /// Shows in der gewählten Sortierung, Shows mit Ordner zusammengefasst. Der Ordner steht an der Stelle
+    /// seiner ersten Show; bei „Name“ werden Ordner und Shows gemeinsam alphabetisch sortiert.
+    func sidebarEntries(_ sort: ShowSort) -> [SidebarEntry] {
+        var entries: [SidebarEntry] = []
+        var folderIndex: [String: Int] = [:]
+        for show in sortedShows(sort) {
+            if let folder = show.folder {
+                if let index = folderIndex[folder], case .folder(let name, let list) = entries[index] {
+                    entries[index] = .folder(name, list + [show])
+                } else {
+                    folderIndex[folder] = entries.count
+                    entries.append(.folder(folder, [show]))
+                }
+            } else {
+                entries.append(.show(show))
+            }
+        }
+        if sort == .name {
+            entries.sort { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+        }
+        return entries
     }
 
     func episodes(for show: Show) -> [Episode] { episodesByShow[show.id] ?? [] }
@@ -303,6 +352,30 @@ final class EpisodeModel: ObservableObject {
     func deletePreset(_ preset: KeyPreset) async throws {
         guard let client = client else { throw ClientError(message: String(localized: "Ungültige Server-Adresse")) }
         presets = try await client.deletePreset(preset.id).presets
+    }
+
+    // MARK: - Ordner
+
+    /// Show in einen Ordner legen (`nil` = aus dem Ordner nehmen)
+    func setFolder(_ showID: String, _ folder: String?) async {
+        guard var show = show(showID) else { return }
+        let name = folder?.trimmingCharacters(in: .whitespacesAndNewlines)
+        show.folder = name?.isEmpty == true ? nil : name
+        do {
+            try await saveShow(show)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Ordner umbenennen oder auflösen (`to` leer)
+    func renameFolder(_ from: String, to: String) async {
+        guard let client = client else { return }
+        do {
+            apply(try await client.renameFolder(from, to: to))
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     func deleteShow(_ id: String) async throws {

@@ -33,6 +33,7 @@ Your laptop / iPhone                   Mac connected to the TV (server)
 - **Manage shows from the iPhone or iPad**: add Joyn series, YouTube channels, Joyn movies and custom shows,
   rename, edit links, delete, reorder and sort (custom / recently watched / A–Z).
 - **iPad layout** with a sidebar like the Mac app, and a two-column remote in landscape.
+- **Folders** to group shows (e.g. "Talent shows", "YouTubers") – collapsible, in the Mac app and the web app.
 - **Key presets**: save a key layout under a name and apply it to any show (built-in: Joyn, YouTube, Standard).
 - **English and German** in the Mac app and the web app (Settings → Language).
 - **Settings** for auto fullscreen, start volume, number of Joyn seasons, YouTube refresh, home page sections,

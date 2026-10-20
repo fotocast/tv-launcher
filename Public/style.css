@@ -599,6 +599,37 @@ h1 {
 .art-large { width: 112px; height: 63px; border-radius: 12px; font-size: 30px; }
 .art-large.art-round { width: 63px; }
 
+/* Ordner */
+
+.chip-folder {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 36px;
+  padding: 0 4px 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--secondary);
+  white-space: nowrap;
+}
+.chip-folder svg { color: var(--accent); font-size: 15px; }
+.folder-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px 6px;
+  color: var(--secondary);
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.folder-row svg { color: var(--accent); font-size: 16px; }
+.folder-row-name { flex: 1; }
+.folder-row .text-button { font-size: 14px; text-transform: none; letter-spacing: 0; }
+.list li.in-folder .manage-row { padding-left: 26px; }
+
 /* Einstellungen */
 
 .switch {
@@ -1014,6 +1045,24 @@ body.sheet-open { overflow: hidden; }
   .side-toggle.open svg { transform: rotate(90deg); }
   .side-sub { min-height: 38px; padding-left: 52px; font-size: 16px; }
   .side-group { margin-bottom: 2px; }
+  .side-folder {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    min-height: 40px;
+    padding: 0 0 0 12px;
+    margin-top: 6px;
+    border-radius: 10px;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--secondary);
+    text-align: left;
+  }
+  .side-folder > svg { color: var(--accent); font-size: 18px; }
+  .side-folder-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--label); }
+  .side-folder-count { font-size: 13px; font-variant-numeric: tabular-nums; }
+  .side-folder-shows { padding-left: 14px; border-left: 2px solid var(--separator); margin-left: 20px; }
 
   main {
     max-width: none;
